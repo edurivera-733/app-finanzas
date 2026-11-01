@@ -1,1 +1,50 @@
-# app-finanzas
+# 💰 Mis Finanzas
+
+App de finanzas personales pensada para iPhone: anota tus **ingresos y gastos**, controla tus **gastos fijos**, descubre cuánto se te va en **gastos hormiga** y sigue tus **metas de ahorro**, todo desde un dashboard simple. Todo es editable.
+
+Es una *web app instalable* (PWA): se agrega a la pantalla de inicio del iPhone, se abre a pantalla completa como una app normal y **funciona sin internet**. No necesita App Store, cuentas ni servidores: tus datos se guardan solo en tu teléfono.
+
+## Qué incluye
+
+| Sección | Qué hace |
+|---|---|
+| **Inicio (dashboard)** | Ahorro del mes y tasa de ahorro vs. tu meta, ingresos, gastos, saldo acumulado, resumen inteligente con consejos, distribución fijos / variables / hormiga, presupuestos por categoría, gastos por categoría, gráfico de los últimos 6 meses (con vista de tabla), metas y últimos movimientos. |
+| **Movimientos** | Lista por día con búsqueda y filtros (ingresos, gastos, fijos, variables, hormiga, por categoría). Toca cualquiera para editarlo, duplicarlo o eliminarlo (con “Deshacer”). |
+| **＋ (agregar)** | Registro rápido: monto, gasto/ingreso, tipo de gasto (fijo, variable, hormiga), categoría, fecha y nota. Opción “Repetir cada mes” para convertirlo en fijo. |
+| **Fijos** | Tus gastos e ingresos mensuales recurrentes (arriendo, luz, internet, sueldo…). Marca “Pagar” y se registra solo; ve cuánto llevas pagado y cuánto queda pendiente. Se pueden pausar. |
+| **Metas** | Metas de ahorro con monto objetivo y fecha límite; calcula cuánto ahorrar al mes. Aportes y retiros editables. |
+| **Ajustes (⚙️)** | Nombre, moneda (CLP, MXN, COP, ARS, PEN, USD, EUR y más), meta de ahorro %, tema claro/oscuro, categorías editables (emoji, nombre, tipo de gasto por defecto y presupuesto mensual), respaldo/importación JSON, exportar a Excel (CSV), datos de ejemplo y borrar todo. |
+
+**Gastos hormiga 🐜:** pequeños gastos diarios (café, snacks, delivery, apps de transporte) que sumados pesan mucho. La app te muestra el total del mes, número de compras, promedio, su proyección anual y tiene botones de registro rápido.
+
+## Cómo instalarla en tu iPhone
+
+1. **Publica la app con GitHub Pages** (una sola vez):
+   - En GitHub, entra al repositorio → **Settings** → **Pages**.
+   - En *Build and deployment* elige **Source: Deploy from a branch**, selecciona la rama (`main` cuando se haga merge, o `claude/personal-finance-app-cq76pu` para probar ya) y la carpeta **`/ (root)`** → **Save**.
+   - En un par de minutos aparecerá la dirección, algo como `https://edurivera-733.github.io/app-finanzas/`.
+2. En el iPhone, abre esa dirección en **Safari**.
+3. Toca **Compartir** (cuadrado con flecha hacia arriba) → **Agregar a pantalla de inicio** → **Agregar**.
+4. Abre **Finanzas** desde tu pantalla de inicio. ¡Listo!
+
+> 💡 Consejo: en *Ajustes → Respaldo de datos* exporta un respaldo de vez en cuando y guárdalo en Archivos / iCloud Drive. Los datos viven solo en el teléfono; si borras la app de la pantalla de inicio se pierden.
+
+## Probar en el computador
+
+```bash
+python3 -m http.server 8000
+# abre http://localhost:8000
+```
+
+## Estructura
+
+```
+index.html            Estructura de la app y barra de pestañas
+css/styles.css        Estilos (modo claro y oscuro, adaptado a iPhone)
+js/app.js             Lógica, cálculos, vistas y almacenamiento local
+manifest.webmanifest  Datos para instalarla como app
+sw.js                 Service worker (uso sin conexión)
+icons/                Íconos de la app
+```
+
+Sin dependencias ni compilación: HTML, CSS y JavaScript puro.
