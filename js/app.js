@@ -77,7 +77,11 @@ function guessCurrency() {
 function freshDB() {
   return {
     version: 1,
-    settings: { currency: guessCurrency(), theme: 'auto', name: '', savingsGoalPct: 20, onboarded: false },
+    updatedAt: '',
+    settings: {
+      currency: guessCurrency(), theme: 'auto', name: '', savingsGoalPct: 20, onboarded: false,
+      createdAt: new Date().toISOString(), lastBackup: '', backupSnoozeUntil: '',
+    },
     categories: defaultCategories(),
     transactions: [],
     fixed: [],
@@ -94,6 +98,7 @@ function normalize(d) {
   const base = freshDB();
   return {
     version: 1,
+    updatedAt: (d && d.updatedAt) || '',
     settings: { ...base.settings, ...(d && d.settings) },
     categories: Array.isArray(d && d.categories) ? d.categories : base.categories,
     transactions: arr(d && d.transactions),
@@ -113,12 +118,18 @@ function load() {
 let db = load();
 
 function save() {
+  db.updatedAt = new Date().toISOString();
+  writeLocal();
+  cloudSchedule();
+}
+function writeLocal() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(db));
   } catch (e) {
     toast('⚠️ No se pudo guardar. Exporta un respaldo.');
   }
 }
+const hasData = () => !!(db.transactions.length || db.fixed.length || db.goals.length);
 
 /* =========================================================
    Utilidades
@@ -285,6 +296,7 @@ function render() {
   document.querySelectorAll('.tabbar .tab[data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === ui.tab));
   const fn = { inicio: renderInicio, movimientos: renderMovimientos, fijos: renderFijos, metas: renderMetas, ajustes: renderAjustes }[ui.tab];
   view.innerHTML = fn();
+  updateCloudBadge();
 }
 
 function applyTheme() {
@@ -340,6 +352,8 @@ function renderInicio() {
       <div class="btn-row"><button class="btn" data-action="sample">Ver con datos de ejemplo</button></div>
     </div>`;
   }
+
+  html += backupReminder();
 
   // Héroe: ahorro del mes
   const rateStatus = rate == null ? null : rate < 0 ? 'critical' : rate >= goalPct ? 'good' : 'warning';
@@ -768,9 +782,13 @@ function renderAjustes() {
   <section class="card settings-list" style="padding:4px 14px"><div class="list">${catList('ingreso')}</div></section>
   <div class="btn-row"><button class="btn block" data-action="new-cat">+ Nueva categoría</button></div>
 
-  <h3 class="section-title">Respaldo de datos</h3>
+  <h3 class="section-title">Copia automática en Google Drive</h3>
+  <section class="card" id="cloudCard">${renderCloudCard()}</section>
+
+  <h3 class="section-title">Respaldo en iCloud / Archivos</h3>
   <section class="card">
-    <p class="sub">Tus datos se guardan solo en este iPhone. Haz un respaldo de vez en cuando (puedes guardarlo en Archivos o iCloud Drive).</p>
+    <p class="sub">Guarda un archivo de respaldo y elige “Guardar en Archivos” → iCloud Drive. Sirve para recuperar tus datos si borras la app o cambias de iPhone.</p>
+    <p class="small muted" style="margin-top:6px">Último respaldo: <b>${db.settings.lastBackup ? esc(fmtDateTime(db.settings.lastBackup)) : 'nunca'}</b></p>
     <div class="btn-row"><button class="btn" data-action="export-json">⬆︎ Exportar respaldo</button><button class="btn" data-action="import-json">⬇︎ Importar</button></div>
     <div class="btn-row"><button class="btn" data-action="export-csv">Exportar a Excel (CSV)</button></div>
   </section>
@@ -1108,17 +1126,23 @@ function saveCat() {
 async function shareOrDownload(filename, content, mime) {
   const file = new File([content], filename, { type: mime });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: filename }); return; }
-    catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.share({ files: [file], title: filename }); return true; }
+    catch (e) { if (e && e.name === 'AbortError') return false; }
   }
   const url = URL.createObjectURL(file);
   const a = document.createElement('a');
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return true;
 }
-function exportJSON() {
-  shareOrDownload(`mis-finanzas-${todayISO()}.json`, JSON.stringify(db, null, 2), 'application/json');
+async function exportJSON() {
+  const ok = await shareOrDownload(`mis-finanzas-${todayISO()}.json`, JSON.stringify(db, null, 2), 'application/json');
+  if (!ok) return;
+  db.settings.lastBackup = new Date().toISOString();
+  db.settings.backupSnoozeUntil = '';
+  save(); render();
+  toast('Respaldo guardado ✓');
 }
 function exportCSV() {
   const q = (s) => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
@@ -1188,6 +1212,296 @@ function sampleData() {
     { id: uid(), name: 'Vacaciones', emoji: '🏖️', target: amt(1500), deadline: addMonths(cur, 7), contributions: [c(2, 150), c(1, 150), c(0, 150)] },
   ];
   return d;
+}
+
+/* =========================================================
+   Copia automática en Google Drive (Google Apps Script)
+   ========================================================= */
+const SYNC_KEY = 'misfinanzas.sync';
+const cloud = (() => {
+  const base = { url: '', key: '', lastSyncedAt: '' };
+  try { return { ...base, ...JSON.parse(localStorage.getItem(SYNC_KEY) || '{}') }; } catch (e) { return base; }
+})();
+const cloudState = { status: 'off', error: '', checked: false, busy: false, pending: false, timer: null, lastCheck: 0 };
+const cloudOn = () => !!(cloud.url && cloud.key);
+const validCloudUrl = (u) => /^https:\/\/script\.google\.com\/(a\/[^/]+\/)?macros\/s\/[\w-]+\/exec$/.test(u);
+
+function saveSync() {
+  try { localStorage.setItem(SYNC_KEY, JSON.stringify(cloud)); } catch (e) { /* sin espacio */ }
+}
+function newCloudKey() {
+  const a = new Uint8Array(12);
+  crypto.getRandomValues(a);
+  return 'mf-' + Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+function errMsg(e) {
+  if (e instanceof TypeError) return 'Sin conexión, o la aplicación web no tiene acceso para “Cualquier usuario”.';
+  return (e && e.message) || 'Error desconocido';
+}
+function setCloudStatus(status, error = '') {
+  cloudState.status = status;
+  cloudState.error = error;
+  updateCloudBadge();
+}
+const fmtDateTimeI = new Intl.DateTimeFormat('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const fmtDateTime = (iso) => fmtDateTimeI.format(new Date(iso));
+function ago(iso) {
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  if (m < 1) return 'recién';
+  if (m < 60) return `hace ${m} min`;
+  if (m < 1440) return `hace ${Math.round(m / 60)} h`;
+  return fmtDateTime(iso);
+}
+
+async function cloudCall(action, extra = {}) {
+  const res = await fetch(cloud.url, { method: 'POST', body: JSON.stringify({ action, key: cloud.key, ...extra }) });
+  let j;
+  try { j = await res.json(); } catch (e) {
+    throw new Error('Google respondió algo inesperado. Revisa que la implementación sea “Aplicación web” con acceso “Cualquier usuario”.');
+  }
+  if (!j.ok) throw new Error(j.error === 'Clave incorrecta' ? 'La clave no coincide con la del código que pegaste en Google.' : j.error || 'Error desconocido');
+  return j;
+}
+
+function cloudSchedule(ms = 1500) {
+  if (!cloudOn()) return;
+  cloudState.pending = true;
+  clearTimeout(cloudState.timer);
+  if (cloudState.checked && !cloudState.busy) setCloudStatus('pending');
+  cloudState.timer = setTimeout(cloudPush, ms);
+}
+
+async function cloudPush() {
+  if (!cloudOn()) return;
+  // No subir nada hasta comparar con lo que hay en Drive (evita pisar datos de otro dispositivo)
+  if (!cloudState.checked || cloudState.busy) { cloudState.pending = true; return; }
+  clearTimeout(cloudState.timer);
+  cloudState.busy = true;
+  cloudState.pending = false;
+  setCloudStatus('syncing');
+  const at = db.updatedAt || new Date().toISOString();
+  try {
+    await cloudCall('save', { data: db, updatedAt: at });
+    cloud.lastSyncedAt = at;
+    saveSync();
+    cloudState.busy = false;
+    setCloudStatus('ok');
+  } catch (e) {
+    cloudState.busy = false;
+    setCloudStatus('error', errMsg(e));
+    return;
+  }
+  if (cloudState.pending) cloudSchedule(300);
+}
+
+async function cloudCheck() {
+  if (!cloudOn() || cloudState.busy) return;
+  cloudState.busy = true;
+  setCloudStatus('syncing');
+  let r;
+  try { r = await cloudCall('load'); } catch (e) {
+    cloudState.busy = false;
+    setCloudStatus('error', errMsg(e));
+    return;
+  }
+  cloudState.busy = false;
+  cloudState.checked = true;
+  cloudState.lastCheck = Date.now();
+  const localAt = db.updatedAt || '';
+  const remoteAt = (r.data && r.updatedAt) || '';
+  if (!r.data) return hasData() ? cloudPush() : setCloudStatus('ok');
+  if (localAt > remoteAt) return cloudPush();
+  if (localAt === remoteAt) return cloudState.pending ? cloudPush() : setCloudStatus('ok');
+  // Drive tiene datos más nuevos (por ejemplo, de otro dispositivo)
+  const localChanged = hasData() && localAt > (cloud.lastSyncedAt || '');
+  if (!localChanged) applyCloud(r, hasData() ? 'Datos actualizados desde Google Drive' : 'Datos recuperados desde Google Drive ✓');
+  else openConflictSheet(r);
+}
+
+function applyCloud(r, msg) {
+  db = normalize(r.data);
+  db.updatedAt = r.updatedAt || db.updatedAt;
+  writeLocal();
+  cloud.lastSyncedAt = db.updatedAt;
+  saveSync();
+  cloudState.checked = true;
+  cloudState.pending = false;
+  setCloudStatus('ok');
+  render();
+  if (msg) toast(msg);
+}
+
+function openConflictSheet(r, firstTime = false) {
+  sheetCtx = { kind: 'conflict', remote: r };
+  const rc = (r.data.transactions || []).length;
+  setCloudStatus('pending');
+  openSheet(`${sheetHead(firstTime ? 'Ya tienes datos en Drive' : 'Hay cambios en dos lugares', null)}
+    <p class="sub" style="margin-bottom:12px">${firstTime
+      ? 'Encontramos una copia en tu Google Drive y también hay datos en este iPhone. ¿Cuáles quieres conservar?'
+      : 'Los datos de Google Drive cambiaron desde otro dispositivo, y este iPhone también tiene cambios sin guardar. Elige cuáles conservar.'}</p>
+    <div class="kv" style="grid-template-columns:1fr 1fr">
+      <div><div class="k">☁️ Google Drive</div><div class="v">${rc} movimientos</div><div class="k">${r.updatedAt ? esc(fmtDateTime(r.updatedAt)) : ''}</div></div>
+      <div><div class="k">📱 Este iPhone</div><div class="v">${db.transactions.length} movimientos</div><div class="k">${db.updatedAt ? esc(fmtDateTime(db.updatedAt)) : ''}</div></div>
+    </div>
+    <div class="btn-row"><button class="btn primary" data-action="conflict-remote">Usar los de Google Drive</button></div>
+    <div class="btn-row"><button class="btn" data-action="conflict-local">Usar los de este iPhone</button></div>
+    <p class="note">Los datos que no elijas no se pierden del todo: Google Drive guarda una copia por día en la carpeta “Mis Finanzas (respaldos)”.</p>`);
+}
+
+async function cloudConnect() {
+  const url = val('cloudUrl').trim();
+  const key = val('cloudKey').trim();
+  if (!validCloudUrl(url)) { toast('Pega la URL de la aplicación web: empieza con https://script.google.com/macros/s/ y termina en /exec'); return; }
+  if (!key) { toast('Falta la clave'); return; }
+  cloud.url = url; cloud.key = key; cloud.lastSyncedAt = '';
+  saveSync();
+  cloudState.checked = false;
+  render();
+  setCloudStatus('syncing');
+  let r;
+  try { r = await cloudCall('load'); } catch (e) {
+    cloud.url = ''; saveSync();
+    setCloudStatus('off');
+    render();
+    toast('No se pudo conectar: ' + errMsg(e));
+    return;
+  }
+  cloudState.checked = true;
+  cloudState.lastCheck = Date.now();
+  if (r.data && hasData() && r.updatedAt !== db.updatedAt) { render(); openConflictSheet(r, true); return; }
+  if (r.data && !hasData()) { applyCloud(r, '¡Conectado! Recuperamos tus datos de Google Drive ✓'); return; }
+  if (!db.updatedAt) { db.updatedAt = new Date().toISOString(); writeLocal(); }
+  await cloudPush();
+  render();
+  if (cloudState.status === 'ok') toast('¡Conectado! Tus datos se guardan solos en Google Drive ✓');
+}
+
+async function cloudRestore() {
+  setCloudStatus('syncing');
+  let r;
+  try { r = await cloudCall('load'); } catch (e) { setCloudStatus('error', errMsg(e)); toast(errMsg(e)); return; }
+  if (!r.data) { setCloudStatus('ok'); toast('Aún no hay datos en Google Drive'); return; }
+  if (!confirm(`¿Reemplazar los datos de este iPhone por la copia de Google Drive (${r.data.transactions.length} movimientos, ${r.updatedAt ? fmtDateTime(r.updatedAt) : ''})?`)) { setCloudStatus('ok'); return; }
+  applyCloud(r, 'Datos recuperados desde Google Drive ✓');
+}
+
+function cloudStatusHTML() {
+  const st = cloudState.status;
+  if (st === 'error') return `<span class="status" style="color:var(--neg-ink)">⚠︎ No se pudo guardar</span><div class="small muted" style="margin-top:2px">${esc(cloudState.error)}</div>`;
+  if (st === 'syncing' || st === 'pending' || !cloudState.checked) return '<span class="status">↻ Guardando en Google Drive…</span>';
+  return `<span class="status" style="color:var(--pos-ink)">✓ Todo guardado en Google Drive</span>${cloud.lastSyncedAt ? `<span class="small muted"> · ${esc(ago(cloud.lastSyncedAt))}</span>` : ''}`;
+}
+
+function renderCloudCard() {
+  if (cloudOn()) {
+    return `<div id="cloudStatus">${cloudStatusHTML()}</div>
+      <p class="note">Cada cambio se guarda solo en la carpeta <b>“Mis Finanzas (respaldos)”</b> de tu Google Drive, con una copia por día de los últimos 60 días.</p>
+      <div class="btn-row"><button class="btn sm" data-action="cloud-push">Guardar ahora</button><button class="btn sm" data-action="cloud-restore">Recuperar desde Drive</button></div>
+      ${cloudState.status === 'error' ? '<div class="btn-row"><button class="btn sm primary" data-action="cloud-retry">Reintentar</button></div>' : ''}
+      <p class="note">¿Otro dispositivo? Abre la app ahí, entra a Ajustes y conecta con la misma URL y esta clave:</p>
+      <div class="row" style="margin-top:6px"><code class="small" style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(cloud.key)}</code><button class="btn sm" data-action="cloud-copy-key">Copiar</button></div>
+      <div class="btn-row"><button class="btn sm danger" data-action="cloud-disconnect">Desconectar</button></div>`;
+  }
+  return `<p class="sub">Guarda tus datos solos en <b>tu</b> Google Drive cada vez que anotas algo. Si borras la app o cambias de teléfono, los recuperas al conectar de nuevo. Se configura una sola vez (unos 10 minutos).</p>
+    <div class="btn-row"><button class="btn primary" data-action="cloud-guide">Paso a paso: activar</button></div>
+    <div class="field" style="margin-top:14px"><label for="cloudUrl">URL de la aplicación web</label>
+      <input id="cloudUrl" class="input" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(cloud.url)}"></div>
+    <div class="field"><label for="cloudKey">Clave</label>
+      <input id="cloudKey" class="input" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="Se crea al abrir el paso a paso" value="${esc(cloud.key)}"></div>
+    <div class="btn-row" style="margin-top:0"><button class="btn" data-action="cloud-connect">Conectar</button></div>`;
+}
+
+function updateCloudBadge() {
+  const b = $('#cloudBtn');
+  if (!b) return;
+  b.hidden = !cloudOn();
+  if (!cloudOn()) return;
+  const st = cloudState.checked || cloudState.status === 'error' ? cloudState.status : 'syncing';
+  const map = {
+    ok: ['var(--good)', '✓', 'Guardado en Google Drive'],
+    syncing: ['var(--accent)', '↻', 'Guardando en Google Drive'],
+    pending: ['var(--accent)', '↻', 'Guardando en Google Drive'],
+    error: ['var(--critical)', '!', 'Error al guardar en Google Drive'],
+    off: ['var(--ink-3)', '', 'Copia en Google Drive'],
+  };
+  const [c, g, label] = map[st] || map.off;
+  b.innerHTML = `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A6 6 0 0 0 6 20h13a5 5 0 0 0 .35-9.96Z"/></svg><span class="cloud-dot" style="background:${c}">${g}</span>`;
+  b.setAttribute('aria-label', label);
+  b.title = label;
+  const s = document.getElementById('cloudStatus');
+  if (s) s.innerHTML = cloudStatusHTML();
+}
+
+async function openCloudGuide() {
+  if (!cloud.key) { cloud.key = newCloudKey(); saveSync(); }
+  const k = $('#cloudKey');
+  if (k && !k.value) k.value = cloud.key;
+  sheetCtx = { kind: 'guide' };
+  openSheet(`${sheetHead('Activar copia en Google Drive', null)}
+    <ol class="steps">
+      <li>Toca <b>Copiar código</b> (ya incluye tu clave secreta). Si lo harás en el computador, toca <b>Enviar</b> y mándatelo por correo o WhatsApp.</li>
+      <li>Abre <a href="https://script.google.com/home" target="_blank" rel="noopener">script.google.com</a> e inicia sesión con tu Gmail. En iPhone, en Safari toca <b>aA → Solicitar sitio web de escritorio</b>. Toca <b>Nuevo proyecto</b>.</li>
+      <li>Borra todo el texto que aparece, <b>pega el código</b> y toca <b>Guardar</b> (💾).</li>
+      <li>Toca <b>Implementar → Nueva implementación</b>. En ⚙️ “Seleccionar tipo” elige <b>Aplicación web</b>. Ejecutar como: <b>Yo</b>. Quién tiene acceso: <b>Cualquier usuario</b>. Toca <b>Implementar</b>.</li>
+      <li>Toca <b>Autorizar acceso</b> y elige tu cuenta. Si dice “Google no verificó esta app”, toca <b>Configuración avanzada → Ir a … (no seguro)</b> y luego <b>Permitir</b>. Es normal: el script es tuyo y solo tú lo usas.</li>
+      <li>Copia la <b>URL de la aplicación web</b> (termina en <code>/exec</code>), vuelve a esta app, pégala en <b>Ajustes → URL de la aplicación web</b> y toca <b>Conectar</b>.</li>
+    </ol>
+    <div class="btn-row"><button class="btn primary" data-action="cloud-copy">Copiar código</button><button class="btn" data-action="cloud-share">Enviar</button></div>
+    <textarea id="cloudCode" class="input small" readonly rows="6" style="margin-top:12px;font-family:ui-monospace,Menlo,monospace;font-size:12px">Cargando código…</textarea>
+    <p class="note">Tu clave: <code>${esc(cloud.key)}</code>. Solo quien tenga la URL y la clave puede leer o guardar tus datos. Nadie más (ni GitHub ni esta app) los recibe.</p>
+    <div class="btn-row"><button class="btn" data-action="close-sheet">Listo</button></div>`);
+  try {
+    const res = await fetch('google-apps-script/Codigo.gs', { cache: 'no-cache' });
+    const code = (await res.text()).replace('PEGA-AQUI-TU-CLAVE', cloud.key);
+    const t = $('#cloudCode');
+    if (t) t.value = code;
+  } catch (e) {
+    const t = $('#cloudCode');
+    if (t) t.value = 'No se pudo cargar el código. Revisa tu conexión a internet y vuelve a abrir este paso a paso.';
+  }
+}
+
+function copyText(text, msg) {
+  const done = () => toast(msg);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text) && done());
+  } else if (fallbackCopy(text)) done();
+}
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  ta.remove();
+  if (!ok) toast('No se pudo copiar: mantén presionado el texto y elige Copiar');
+  return ok;
+}
+function copyCloudCode() {
+  const t = $('#cloudCode');
+  if (!t || t.value.startsWith('Cargando') || t.value.startsWith('No se pudo')) { toast('Espera a que cargue el código'); return; }
+  copyText(t.value, 'Código copiado ✓ Ahora ábrelo en script.google.com');
+}
+
+/* ---------- Recordatorio de respaldo ---------- */
+function backupReminder() {
+  if (!hasData()) return '';
+  const s = db.settings;
+  const now = Date.now();
+  if (s.backupSnoozeUntil && now < Date.parse(s.backupSnoozeUntil)) return '';
+  const cloudOk = cloudOn() && cloudState.status !== 'error';
+  const since = Date.parse(s.lastBackup || s.createdAt || '') || now;
+  const days = Math.floor((now - since) / 864e5);
+  if (days < (cloudOk ? 30 : 7)) return '';
+  if (s.lastBackup && (db.updatedAt || '') <= s.lastBackup) return '';
+  return `<section class="card">
+    <div class="row" style="align-items:flex-start"><span class="emoji" aria-hidden="true">💾</span>
+      <div style="flex:1"><b>Haz un respaldo en iCloud</b>
+        <p class="sub" style="margin-top:2px">${s.lastBackup ? `Tu último respaldo fue hace ${days} días.` : 'Aún no has guardado ningún respaldo.'}
+        ${cloudOk ? 'Ya tienes copia automática en Google Drive; este es un respaldo extra.' : 'Si borras la app o cambias de iPhone, lo vas a necesitar.'}</p></div></div>
+    <div class="btn-row"><button class="btn sm primary" data-action="export-json">Respaldar ahora</button><button class="btn sm" data-action="snooze-backup">Más tarde</button></div>
+    <p class="note">Al respaldar elige “Guardar en Archivos” → iCloud Drive.${!cloudOn() ? ' O mejor, <button class="link" style="color:var(--accent);font-size:inherit" data-action="cloud-goto">activa la copia automática en Google Drive</button>.' : ''}</p>
+  </section>`;
 }
 
 /* =========================================================
@@ -1314,13 +1628,40 @@ const actions = {
   'save-cat': () => saveCat(),
   'del-cat': () => { const id = sheetCtx.id; withUndo('Categoría eliminada', () => { db.categories = db.categories.filter((c) => c.id !== id); }); },
 
+  // Copia en Google Drive y recordatorio
+  'snooze-backup': () => {
+    db.settings.backupSnoozeUntil = new Date(Date.now() + 3 * 864e5).toISOString();
+    save(); render(); toast('Te lo recordaré en 3 días');
+  },
+  'cloud-goto': () => { ui.tab = 'ajustes'; render(); const c = $('#cloudCard'); if (c) c.scrollIntoView({ block: 'center' }); },
+  'cloud-guide': () => openCloudGuide(),
+  'cloud-copy': () => copyCloudCode(),
+  'cloud-share': () => {
+    const t = $('#cloudCode');
+    if (t && navigator.share) navigator.share({ title: 'Código Mis Finanzas', text: t.value }).catch(() => {});
+    else copyCloudCode();
+  },
+  'cloud-connect': () => cloudConnect(),
+  'cloud-push': async () => { await cloudPush(); if (cloudState.status === 'ok') toast('Guardado en Google Drive ✓'); },
+  'cloud-retry': () => cloudCheck(),
+  'cloud-restore': () => cloudRestore(),
+  'cloud-copy-key': () => copyText(cloud.key, 'Clave copiada'),
+  'cloud-disconnect': () => {
+    if (!confirm('¿Desconectar la copia automática? Tus datos quedan en este iPhone y la copia existente sigue en tu Google Drive.')) return;
+    cloud.url = ''; cloud.lastSyncedAt = ''; saveSync();
+    cloudState.status = 'off'; cloudState.checked = false;
+    render(); toast('Copia automática desactivada');
+  },
+  'conflict-remote': () => { const r = sheetCtx.remote; closeSheet(); applyCloud(r, 'Datos de Google Drive cargados ✓'); },
+  'conflict-local': async () => { closeSheet(); cloudState.checked = true; await cloudPush(); if (cloudState.status === 'ok') toast('Se guardaron en Google Drive los datos de este iPhone ✓'); },
+
   // Ajustes
   theme: (el) => { db.settings.theme = el.dataset.v; save(); render(); },
   'export-json': () => exportJSON(),
   'export-csv': () => exportCSV(),
   'import-json': () => $('#importFile').click(),
   reset: () => {
-    if (!confirm('¿Borrar TODOS tus datos? Te recomendamos exportar un respaldo antes.')) return;
+    if (!confirm(`¿Borrar TODOS tus datos?${cloudOn() ? ' También se borrarán de la copia en Google Drive (el historial diario se conserva).' : ''} Te recomendamos exportar un respaldo antes.`)) return;
     const snapshot = JSON.stringify(db);
     const keep = { currency: db.settings.currency, theme: db.settings.theme };
     db = freshDB(); Object.assign(db.settings, keep); save(); ui.tab = 'inicio'; render();
@@ -1369,6 +1710,8 @@ $('#importFile').addEventListener('change', (e) => {
 // Mantener el mes actual al volver a la app tras días sin abrirla
 let lastActiveMonth = currentMonth();
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && cloudOn() && cloudState.pending) cloudPush();
+  if (document.visibilityState === 'visible' && cloudOn() && Date.now() - cloudState.lastCheck > 60000) cloudCheck();
   if (document.visibilityState === 'visible' && currentMonth() !== lastActiveMonth) {
     if (ui.month === lastActiveMonth) ui.month = currentMonth();
     lastActiveMonth = currentMonth();
@@ -1379,7 +1722,10 @@ document.addEventListener('visibilitychange', () => {
 /* =========================================================
    Inicio
    ========================================================= */
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 render();
+if (cloudOn()) cloudCheck();
+window.addEventListener('online', () => { if (cloudOn() && cloudState.status === 'error') cloudCheck(); });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

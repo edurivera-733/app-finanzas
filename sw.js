@@ -1,5 +1,5 @@
 /* Service worker: permite usar la app sin conexión */
-const CACHE = 'misfinanzas-v1';
+const CACHE = 'misfinanzas-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -9,6 +9,7 @@ const ASSETS = [
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',
+  './google-apps-script/Codigo.gs',
 ];
 
 self.addEventListener('install', (e) => {

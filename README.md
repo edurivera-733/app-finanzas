@@ -27,7 +27,13 @@ Es una *web app instalable* (PWA): se agrega a la pantalla de inicio del iPhone,
 3. Toca **Compartir** (cuadrado con flecha hacia arriba) → **Agregar a pantalla de inicio** → **Agregar**.
 4. Abre **Finanzas** desde tu pantalla de inicio. ¡Listo!
 
-> 💡 Consejo: en *Ajustes → Respaldo de datos* exporta un respaldo de vez en cuando y guárdalo en Archivos / iCloud Drive. Los datos viven solo en el teléfono; si borras la app de la pantalla de inicio se pierden.
+## ¿Dónde se guardan mis datos?
+
+- **En tu iPhone**, dentro de la app instalada. No se envían a GitHub ni a ningún servidor.
+- **Copia automática en tu Google Drive (opcional, recomendada):** en *Ajustes → Copia automática en Google Drive → Paso a paso: activar*. La app genera un pequeño script con tu clave secreta; lo pegas en [script.google.com](https://script.google.com), lo implementas como *Aplicación web* y pegas la URL en la app. Desde ese momento cada cambio se guarda solo en la carpeta **“Mis Finanzas (respaldos)”** de tu Drive, con una copia por día de los últimos 60 días. Si cambias de teléfono, conectas con la misma URL y clave y tus datos vuelven. También sirve para usar la app en más de un dispositivo. El código está en [`google-apps-script/Codigo.gs`](google-apps-script/Codigo.gs).
+- **Respaldo en iCloud (manual):** *Ajustes → Exportar respaldo → Guardar en Archivos → iCloud Drive*. La app te recuerda hacerlo cada 7 días (o cada 30 si tienes la copia en Google Drive activa).
+
+> ⚠️ Si borras el ícono de la pantalla de inicio sin tener copia en Google Drive o un respaldo, los datos se pierden.
 
 ## Probar en el computador
 
@@ -45,6 +51,7 @@ js/app.js             Lógica, cálculos, vistas y almacenamiento local
 manifest.webmanifest  Datos para instalarla como app
 sw.js                 Service worker (uso sin conexión)
 icons/                Íconos de la app
+google-apps-script/   Script para la copia automática en Google Drive
 ```
 
 Sin dependencias ni compilación: HTML, CSS y JavaScript puro.
