@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mis Finanzas</title>
+  <meta name="description" content="Finanzas personales: ingresos, gastos, gastos fijos, gastos hormiga y metas de ahorro.">
+  <meta name="theme-color" content="#f1f1ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Finanzas">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-row">
+      <h1 id="title">Inicio</h1>
+      <button class="icon-btn" data-action="go" data-tab="ajustes" aria-label="Ajustes">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm0 5.5a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm8.4-3.2-1.6-.3a7 7 0 0 0-.6-1.5l.9-1.4a.8.8 0 0 0-.1-1l-1.6-1.6a.8.8 0 0 0-1-.1l-1.4.9a7 7 0 0 0-1.5-.6l-.3-1.6A.8.8 0 0 0 12.4 2h-2.3a.8.8 0 0 0-.8.6l-.3 1.6a7 7 0 0 0-1.5.6l-1.4-.9a.8.8 0 0 0-1 .1L3.5 5.6a.8.8 0 0 0-.1 1l.9 1.4a7 7 0 0 0-.6 1.5l-1.6.3a.8.8 0 0 0-.6.8v2.3c0 .4.3.7.6.8l1.6.3c.1.5.3 1 .6 1.5l-.9 1.4a.8.8 0 0 0 .1 1l1.6 1.6c.3.3.7.3 1 .1l1.4-.9c.5.3 1 .5 1.5.6l.3 1.6c.1.4.4.6.8.6h2.3c.4 0 .7-.3.8-.6l.3-1.6c.5-.1 1-.3 1.5-.6l1.4.9c.3.2.7.2 1-.1l1.6-1.6c.3-.3.3-.7.1-1l-.9-1.4c.3-.5.5-1 .6-1.5l1.6-.3c.4-.1.6-.4.6-.8v-2.3a.8.8 0 0 0-.6-.8Z"/></svg>
+      </button>
+    </div>
+    <div class="month-nav" id="monthNav">
+      <button class="icon-btn" data-action="month" data-delta="-1" aria-label="Mes anterior">‹</button>
+      <button class="month-label" id="monthLabel" data-action="month-today"></button>
+      <button class="icon-btn" data-action="month" data-delta="1" aria-label="Mes siguiente">›</button>
+    </div>
+  </header>
+
+  <main id="view" tabindex="-1"></main>
+
+  <nav class="tabbar" aria-label="Secciones">
+    <button data-action="go" data-tab="inicio" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+      <span>Inicio</span>
+    </button>
+    <button data-action="go" data-tab="movimientos" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v2H4V6Zm0 5h16v2H4v-2Zm0 5h10v2H4v-2Z"/></svg>
+      <span>Movimientos</span>
+    </button>
+    <button data-action="add" class="tab tab-add" aria-label="Agregar movimiento">
+      <span class="plus">+</span>
+    </button>
+    <button data-action="go" data-tab="fijos" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2v2H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V2h-2v2H9V2H7Zm-2 8h14v10H5V10Zm2 2v2h2v-2H7Zm4 0v2h2v-2h-2Zm4 0v2h2v-2h-2Z"/></svg>
+      <span>Fijos</span>
+    </button>
+    <button data-action="go" data-tab="metas" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8Zm0-14a6 6 0 1 0 6 6 6 6 0 0 0-6-6Zm0 10a4 4 0 1 1 4-4 4 4 0 0 1-4 4Zm0-6a2 2 0 1 0 2 2 2 2 0 0 0-2-2Z"/></svg>
+      <span>Metas</span>
+    </button>
+  </nav>
+
+  <div class="sheet-backdrop" id="backdrop" data-action="close-sheet" hidden></div>
+  <section class="sheet" id="sheet" role="dialog" aria-modal="true" hidden></section>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <input type="file" id="importFile" accept="application/json,.json" hidden>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
