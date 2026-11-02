@@ -4,8 +4,6 @@ App de finanzas personales pensada para iPhone: anota tus **ingresos y gastos**,
 
 Es una *web app instalable* (PWA): se agrega a la pantalla de inicio del iPhone, se abre a pantalla completa como una app normal y **funciona sin internet**. No necesita App Store, cuentas ni servidores: tus datos se guardan solo en tu teléfono.
 
-> 🗓️ **Nuevo:** en la carpeta [`turnos/`](turnos/) está **Turnos 7x7**, un calendario de turnos editable (día, noche, descanso, vacaciones, permisos, cursos…). Se instala igual, abriendo `https://edurivera-733.github.io/app-finanzas/turnos/` en Safari.
-
 ## Qué incluye
 
 | Sección | Qué hace |
