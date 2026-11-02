@@ -8,12 +8,14 @@ Es una *web app instalable* (PWA): se agrega a la pantalla de inicio del iPhone,
 
 | Sección | Qué hace |
 |---|---|
-| **Inicio (dashboard)** | Ahorro del mes y tasa de ahorro vs. tu meta, ingresos, gastos, saldo acumulado, resumen inteligente con consejos, distribución fijos / variables / hormiga, presupuestos por categoría, gastos por categoría, gráfico de los últimos 6 meses (con vista de tabla), metas y últimos movimientos. |
-| **Movimientos** | Lista por día con búsqueda y filtros (ingresos, gastos, fijos, variables, hormiga, por categoría). Toca cualquiera para editarlo, duplicarlo o eliminarlo (con “Deshacer”). |
-| **＋ (agregar)** | Registro rápido: monto, gasto/ingreso, tipo de gasto (fijo, variable, hormiga), categoría, fecha y nota. Opción “Repetir cada mes” para convertirlo en fijo. |
-| **Fijos** | Tus gastos e ingresos mensuales recurrentes (arriendo, luz, internet, sueldo…). Marca “Pagar” y se registra solo; ve cuánto llevas pagado y cuánto queda pendiente. Se pueden pausar. |
-| **Metas** | Metas de ahorro con monto objetivo y fecha límite; calcula cuánto ahorrar al mes. Aportes y retiros editables. |
+| **Inicio (dashboard)** | Saldo disponible primero, luego tu ahorro (del mes y total a la fecha, con tu meta mensual), ingresos, gastos, cuotas del mes, resumen inteligente, cuotas en curso, distribución fijos / variables / hormiga, presupuestos, gastos por categoría, gráfico de 6 meses, metas y últimos movimientos. |
+| **Movimientos** | Lista por día con búsqueda y filtros (ingresos, gastos, ahorro, cuotas, fijos, variables, hormiga, por categoría). Toca cualquiera para editarlo, duplicarlo o eliminarlo (con “Deshacer”). |
+| **＋ (agregar)** | Gasto, ingreso o **ahorro**. Monto, tipo de gasto (fijo, variable, hormiga), categoría o meta, fecha y nota. “Repetir cada mes” lo convierte en fijo. Si un gasto fue en cuotas, se registra como compra en cuotas. |
+| **Pagos** | **Compras en cuotas** con tarjeta de crédito (con o sin interés, tasa mensual) o préstamo: barra con las cuotas pagadas, cuánto queda y cuándo termina; botón “Pagar cuota”. Además gastos, ingresos y ahorros fijos mensuales con “Pagar / Recibir / Ahorrar”. |
+| **Metas** | Total ahorrado a la fecha, ahorro del mes, metas con objetivo y fecha límite, aportes y retiros. |
 | **Ajustes (⚙️)** | Nombre, moneda (CLP, MXN, COP, ARS, PEN, USD, EUR y más), meta de ahorro %, tema claro/oscuro, categorías editables (emoji, nombre, tipo de gasto por defecto y presupuesto mensual), respaldo/importación JSON, exportar a Excel (CSV), datos de ejemplo y borrar todo. |
+
+**Saldo y ahorro:** el saldo disponible es tu saldo inicial + ingresos − gastos − lo que apartas como ahorro. El ahorro no es “lo que sobra”: es lo que tú anotas que ahorraste, y se acumula en el total ahorrado a la fecha. Si ya tenías ahorros, regístralos con “Ya lo tenía ahorrado”.
 
 **Gastos hormiga 🐜:** pequeños gastos diarios (café, snacks, delivery, apps de transporte) que sumados pesan mucho. La app te muestra el total del mes, número de compras, promedio, su proyección anual y tiene botones de registro rápido.
 
