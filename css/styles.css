@@ -423,3 +423,31 @@ textarea.input { resize: vertical; min-height: 120px; }
 .meter.cuota > span { background: var(--s-cuota); }
 .credit-line { font-size: 16px; }
 .credit-line b { font-weight: 700; }
+
+/* ===== Bloqueo ===== */
+.lock {
+  position: fixed; inset: 0; z-index: 200; background: var(--page);
+  display: flex; align-items: center; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 16px) 24px calc(env(safe-area-inset-bottom) + 16px);
+  overflow-y: auto;
+}
+body.is-locked .topbar, body.is-locked main, body.is-locked .tabbar, body.is-locked .sheet, body.is-locked .sheet-backdrop { visibility: hidden; }
+.lock-inner { width: 100%; max-width: 320px; text-align: center; display: grid; justify-items: center; gap: 6px; }
+.lock-logo { width: 64px; height: 64px; border-radius: 15px; margin-bottom: 6px; }
+.lock-inner h2 { font-size: 22px; font-weight: 700; }
+.pin-dots { display: flex; gap: 16px; margin: 18px 0 6px; min-height: 16px; }
+.pin-dots span { width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 2px var(--ink-2); transition: background .1s; }
+.pin-dots span.on { background: var(--ink-1); box-shadow: none; }
+.pin-dots.shake { animation: shake .35s; }
+@keyframes shake { 20%, 60% { transform: translateX(-8px); } 40%, 80% { transform: translateX(8px); } }
+.lock-msg { min-height: 20px; font-size: 14px; color: var(--neg-ink); }
+.keypad { display: grid; grid-template-columns: repeat(3, 76px); gap: 16px 24px; margin-top: 10px; justify-content: center; }
+.key {
+  width: 76px; height: 76px; border-radius: 50%; background: color-mix(in srgb, var(--ink-1) 8%, transparent); font-size: 30px; font-weight: 400;
+  display: grid; place-items: center; font-variant-numeric: tabular-nums;
+}
+.key:active { background: color-mix(in srgb, var(--ink-1) 22%, transparent); }
+.key-text { background: transparent; font-size: 26px; }
+.lock-foot { display: grid; gap: 10px; margin-top: 18px; }
+.lock-foot .link { color: var(--accent); font-size: 15px; font-weight: 500; }
+@media (max-height: 640px) { .key { width: 64px; height: 64px; font-size: 26px; } .keypad { grid-template-columns: repeat(3, 64px); gap: 12px 20px; } }

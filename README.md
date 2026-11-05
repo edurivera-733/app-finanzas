@@ -13,6 +13,7 @@ Es una *web app instalable* (PWA): se agrega a la pantalla de inicio del iPhone,
 | **＋ (agregar)** | Gasto, ingreso o **ahorro**. Monto, tipo de gasto (fijo, variable, hormiga), categoría o meta, fecha y nota. “Repetir cada mes” lo convierte en fijo. Si un gasto fue en cuotas, se registra como compra en cuotas. |
 | **Pagos** | **Compras en cuotas** con tarjeta de crédito (con o sin interés, tasa mensual) o préstamo: barra con las cuotas pagadas, cuánto queda y cuándo termina; botón “Pagar cuota”. Además gastos, ingresos y ahorros fijos mensuales con “Pagar / Recibir / Ahorrar”. |
 | **Metas** | Total ahorrado a la fecha, ahorro del mes, metas con objetivo y fecha límite, aportes y retiros. |
+| **Bloqueo** | Código de 4 o 6 dígitos y, si quieres, Face ID / Touch ID para abrir la app. Se puede pedir al salir o después de 1, 5 o 15 minutos. Se activa en *Ajustes → Bloqueo de la app*. |
 | **Ajustes (⚙️)** | Nombre, moneda (CLP, MXN, COP, ARS, PEN, USD, EUR y más), meta de ahorro %, tema claro/oscuro, categorías editables (emoji, nombre, tipo de gasto por defecto y presupuesto mensual), respaldo/importación JSON, exportar a Excel (CSV), datos de ejemplo y borrar todo. |
 
 **Saldo y ahorro:** el saldo disponible es tu saldo inicial + ingresos − gastos − lo que apartas como ahorro. El ahorro no es “lo que sobra”: es lo que tú anotas que ahorraste, y se acumula en el total ahorrado a la fecha. Si ya tenías ahorros, regístralos con “Ya lo tenía ahorrado”.

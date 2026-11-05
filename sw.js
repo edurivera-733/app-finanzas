@@ -1,5 +1,5 @@
 /* Service worker: permite usar la app sin conexión */
-const CACHE = 'misfinanzas-v3';
+const CACHE = 'misfinanzas-v4';
 const ASSETS = [
   './',
   './index.html',
