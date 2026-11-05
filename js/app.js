@@ -963,6 +963,9 @@ function renderAjustes() {
   <section class="card settings-list" style="padding:4px 14px"><div class="list">${catList('ingreso')}</div></section>
   <div class="btn-row"><button class="btn block" data-action="new-cat">+ Nueva categoría</button></div>
 
+  <h3 class="section-title">Bloqueo de la app</h3>
+  <section class="card" id="lockCard">${renderLockCard()}</section>
+
   <h3 class="section-title">Copia automática en Google Drive</h3>
   <section class="card" id="cloudCard">${renderCloudCard()}</section>
 
@@ -1875,6 +1878,191 @@ function withUndo(msg, mutate) {
 }
 
 /* =========================================================
+   Bloqueo de la app (código + Face ID / Touch ID)
+   Se guarda aparte de los datos: no se exporta ni se sincroniza.
+   ========================================================= */
+const LOCK_KEY = 'misfinanzas.lock';
+const lockCfg = (() => {
+  const base = { enabled: false, hash: '', salt: '', len: 4, delay: 0, credId: '' };
+  try { return { ...base, ...JSON.parse(localStorage.getItem(LOCK_KEY) || '{}') }; } catch (e) { return base; }
+})();
+const lockUI = { mode: null, buf: '', first: '', len: 4, msg: '', onDone: null, attempts: 0, until: 0, hiddenAt: 0, bioAvail: false, bioBusy: false };
+const lockEl = $('#lock');
+
+function saveLock() {
+  try { localStorage.setItem(LOCK_KEY, JSON.stringify(lockCfg)); } catch (e) { /* sin espacio */ }
+}
+async function hashPin(pin, salt) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${salt}:${pin}`));
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+async function bioAvailable() {
+  try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); }
+  catch (e) { return false; }
+}
+async function bioRegister() {
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { name: 'Mis Finanzas' },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'Mis Finanzas', displayName: 'Mis Finanzas' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' },
+      attestation: 'none',
+      timeout: 60000,
+    },
+  });
+  lockCfg.credId = b64(cred.rawId);
+  saveLock();
+}
+async function bioUnlock(auto = false) {
+  if (!lockCfg.credId || lockUI.bioBusy || lockUI.mode !== 'unlock') return;
+  lockUI.bioBusy = true;
+  try {
+    await navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{ type: 'public-key', id: unb64(lockCfg.credId) }],
+        userVerification: 'required',
+        timeout: 60000,
+      },
+    });
+    hideLock();
+  } catch (e) {
+    if (!auto && lockUI.mode) { lockUI.msg = `No se pudo usar ${bioName()}. Ingresa tu código.`; drawLock(); }
+  } finally {
+    lockUI.bioBusy = false;
+  }
+}
+const bioName = () => (/iPhone|iPad|Mac/.test(navigator.userAgent) ? 'Face ID / Touch ID' : 'huella o rostro');
+
+function showLock(mode, opts = {}) {
+  lockUI.mode = mode;
+  lockUI.buf = '';
+  lockUI.msg = opts.msg || '';
+  lockUI.onDone = opts.onDone || null;
+  lockUI.len = mode === 'setup1' ? opts.len || 4 : mode === 'setup2' ? lockUI.len : lockCfg.len;
+  lockEl.hidden = false;
+  document.body.classList.add('is-locked');
+  drawLock();
+  if (mode === 'unlock' && lockCfg.credId && document.visibilityState === 'visible') setTimeout(() => bioUnlock(true), 300);
+}
+function hideLock() {
+  lockEl.hidden = true;
+  lockEl.innerHTML = '';
+  lockUI.mode = null;
+  lockUI.buf = '';
+  lockUI.attempts = 0;
+  document.body.classList.remove('is-locked');
+}
+function lockNow() {
+  if (lockCfg.enabled && lockUI.mode !== 'unlock') { closeSheet(); showLock('unlock'); }
+}
+
+function drawLock() {
+  const m = lockUI.mode;
+  const titles = {
+    unlock: ['Mis Finanzas', 'Ingresa tu código'],
+    setup1: ['Crea tu código', `Elige ${lockUI.len} números que recuerdes`],
+    setup2: ['Confirma tu código', 'Escríbelo de nuevo'],
+    verify: ['Código actual', 'Ingresa tu código para continuar'],
+  };
+  const [title, sub] = titles[m];
+  const wait = Math.max(0, Math.ceil((lockUI.until - Date.now()) / 1000));
+  const dots = Array.from({ length: lockUI.len }, (_, i) => `<span class="${i < lockUI.buf.length ? 'on' : ''}"></span>`).join('');
+  const key = (k, label = k) => `<button class="key" data-action="pin-key" data-k="${k}" aria-label="${label}">${label}</button>`;
+  const bioKey = m === 'unlock' && lockCfg.credId
+    ? `<button class="key key-text" data-action="pin-bio" aria-label="Desbloquear con ${bioName()}">${/iPhone|iPad/.test(navigator.userAgent) ? '🙂' : '🔐'}</button>`
+    : '<span></span>';
+  lockEl.innerHTML = `<div class="lock-inner">
+    <img class="lock-logo" src="icons/apple-touch-icon.png" alt="" width="64" height="64">
+    <h2>${esc(title)}</h2>
+    <p class="sub">${esc(sub)}</p>
+    <div class="pin-dots" id="pinDots" aria-label="${lockUI.buf.length} de ${lockUI.len} dígitos">${dots}</div>
+    <p class="lock-msg" role="alert">${wait ? `Demasiados intentos. Espera ${wait} s.` : esc(lockUI.msg)}</p>
+    <div class="keypad">
+      ${['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((k) => key(k)).join('')}
+      ${bioKey}${key('0')}<button class="key key-text" data-action="pin-key" data-k="del" aria-label="Borrar">⌫</button>
+    </div>
+    <div class="lock-foot">
+      ${m === 'unlock' ? `${lockCfg.credId ? `<button class="link" data-action="pin-bio">Usar ${bioName()}</button>` : ''}
+        <button class="link" data-action="pin-forgot">¿Olvidaste tu código?</button>` : ''}
+      ${m === 'setup1' ? `<button class="link" data-action="pin-len">Usar código de ${lockUI.len === 4 ? 6 : 4} dígitos</button>` : ''}
+      ${m !== 'unlock' ? '<button class="link" data-action="pin-cancel">Cancelar</button>' : ''}
+    </div>
+  </div>`;
+  if (wait) setTimeout(drawLock, 1000);
+}
+function shakeDots() {
+  const d = $('#pinDots');
+  if (!d) return;
+  d.classList.remove('shake'); void d.offsetWidth; d.classList.add('shake');
+  if (navigator.vibrate) navigator.vibrate(120);
+}
+
+async function pinKey(k) {
+  if (!lockUI.mode || Date.now() < lockUI.until) return;
+  if (k === 'del') lockUI.buf = lockUI.buf.slice(0, -1);
+  else if (lockUI.buf.length < lockUI.len) lockUI.buf += k;
+  lockUI.msg = '';
+  drawLock();
+  if (lockUI.buf.length < lockUI.len) return;
+  const pin = lockUI.buf;
+  const m = lockUI.mode;
+  if (m === 'setup1') {
+    lockUI.first = pin;
+    showLock('setup2', { onDone: lockUI.onDone });
+    return;
+  }
+  if (m === 'setup2') {
+    if (pin !== lockUI.first) { lockUI.first = ''; showLock('setup1', { len: lockUI.len, msg: 'Los códigos no coinciden. Inténtalo de nuevo.', onDone: lockUI.onDone }); shakeDots(); return; }
+    lockCfg.salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+    lockCfg.hash = await hashPin(pin, lockCfg.salt);
+    lockCfg.len = lockUI.len;
+    lockCfg.enabled = true;
+    saveLock();
+    const done = lockUI.onDone;
+    hideLock();
+    render();
+    if (done) done(); else toast('🔒 Código de bloqueo activado');
+    return;
+  }
+  // unlock / verify
+  const ok = (await hashPin(pin, lockCfg.salt)) === lockCfg.hash;
+  if (ok) {
+    const done = lockUI.onDone;
+    hideLock();
+    if (done) done();
+    return;
+  }
+  lockUI.attempts++;
+  lockUI.buf = '';
+  lockUI.msg = 'Código incorrecto';
+  if (lockUI.attempts >= 5) { lockUI.until = Date.now() + 30000; lockUI.attempts = 0; }
+  drawLock();
+  shakeDots();
+}
+
+function renderLockCard() {
+  if (!lockCfg.enabled) {
+    return `<p class="sub">Pide un código ${lockUI.bioAvail ? `(o ${bioName()}) ` : ''}cada vez que abras la app, para que nadie más vea tus finanzas.</p>
+      <div class="btn-row"><button class="btn primary" data-action="lock-setup">🔒 Activar código de bloqueo</button></div>`;
+  }
+  const delays = [[0, 'Al salir'], [1, '1 min'], [5, '5 min'], [15, '15 min']];
+  return `<div class="status" style="color:var(--pos-ink)">🔒 Bloqueo activado · código de ${lockCfg.len} dígitos</div>
+    <div class="field" style="margin-top:12px"><span class="lbl">Pedir el código</span><div class="seg">
+      ${delays.map(([v, l]) => `<button class="${+lockCfg.delay === v ? 'on' : ''}" data-action="lock-delay" data-v="${v}">${l}</button>`).join('')}</div>
+      <div class="note" style="margin-top:2px">Tiempo fuera de la app antes de volver a pedir el código. Siempre se pide al abrirla.</div></div>
+    ${lockUI.bioAvail ? `<div class="switch-row"><span><b>Desbloquear con ${bioName()}</b><br><span class="small muted">El código sigue funcionando como respaldo</span></span>
+      <label class="switch"><input type="checkbox" id="lockBio" ${lockCfg.credId ? 'checked' : ''}><span></span></label></div>` : ''}
+    <div class="btn-row"><button class="btn sm" data-action="lock-now">Bloquear ahora</button><button class="btn sm" data-action="lock-change">Cambiar código</button></div>
+    <div class="btn-row"><button class="btn sm danger" data-action="lock-off">Desactivar bloqueo</button></div>
+    <p class="note">Si olvidas el código tendrás que borrar los datos de este iPhone para entrar. Con la copia automática en Google Drive activa, se recuperan solos.</p>`;
+}
+
+/* =========================================================
    Acciones
    ========================================================= */
 const actions = {
@@ -2051,6 +2239,37 @@ const actions = {
 
   // Ajustes
   theme: (el) => { db.settings.theme = el.dataset.v; save(); render(); },
+
+  // Bloqueo
+  'pin-key': (el) => pinKey(el.dataset.k),
+  'pin-bio': () => bioUnlock(),
+  'pin-len': () => showLock('setup1', { len: lockUI.len === 4 ? 6 : 4, onDone: lockUI.onDone }),
+  'pin-cancel': () => hideLock(),
+  'pin-forgot': () => {
+    const drive = cloudOn();
+    if (!confirm(`Sin el código, la única forma de entrar es borrar los datos de la app en este iPhone.${drive ? ' Como tienes la copia automática en Google Drive, se recuperarán al abrirla de nuevo.' : ' Si tienes un respaldo, podrás importarlo después.'}
+
+¿Borrar los datos de este dispositivo?`)) return;
+    if (!drive && !confirm('Esto no se puede deshacer. ¿Seguro?')) return;
+    try { localStorage.removeItem(STORE_KEY); localStorage.removeItem(LOCK_KEY); } catch (e) { /* nada */ }
+    location.reload();
+  },
+  'lock-setup': () => showLock('setup1', {
+    len: 4,
+    onDone: () => {
+      toast('🔒 Código de bloqueo activado');
+      if (lockUI.bioAvail) setTimeout(() => { const c = $('#lockCard'); if (c) c.scrollIntoView({ block: 'center' }); }, 50);
+    },
+  }),
+  'lock-delay': (el) => { lockCfg.delay = +el.dataset.v; saveLock(); render(); },
+  'lock-now': () => lockNow(),
+  'lock-change': () => showLock('verify', { onDone: () => showLock('setup1', { len: lockCfg.len, onDone: () => toast('Código cambiado ✓') }) }),
+  'lock-off': () => showLock('verify', {
+    onDone: () => {
+      lockCfg.enabled = false; lockCfg.hash = ''; lockCfg.salt = ''; lockCfg.credId = '';
+      saveLock(); render(); toast('Bloqueo desactivado');
+    },
+  }),
   'export-json': () => exportJSON(),
   'export-csv': () => exportCSV(),
   'import-json': () => $('#importFile').click(),
@@ -2078,7 +2297,14 @@ document.addEventListener('input', (e) => {
   }
 });
 
-document.addEventListener('change', (e) => {
+document.addEventListener('change', async (e) => {
+  if (e.target.id === 'lockBio') {
+    if (e.target.checked) {
+      try { await bioRegister(); toast(`${bioName()} activado ✓`); }
+      catch (err) { e.target.checked = false; toast(`No se pudo activar ${bioName()}`); }
+    } else { lockCfg.credId = ''; saveLock(); toast(`${bioName()} desactivado`); }
+    return;
+  }
   const key = e.target.dataset.setting;
   if (!key) return;
   let v = e.target.value;
@@ -2090,6 +2316,11 @@ document.addEventListener('change', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (lockUI.mode) {
+    if (/^\d$/.test(e.key)) { e.preventDefault(); pinKey(e.key); }
+    else if (e.key === 'Backspace') { e.preventDefault(); pinKey('del'); }
+    return;
+  }
   if (e.key === 'Escape' && !sheet.hidden) closeSheet();
   if (e.key === 'Enter' && !sheet.hidden && e.target.matches('input:not([type=checkbox])')) {
     const btn = sheet.querySelector('.sheet-head .link.strong');
@@ -2106,6 +2337,13 @@ $('#importFile').addEventListener('change', (e) => {
 // Mantener el mes actual al volver a la app tras días sin abrirla
 let lastActiveMonth = currentMonth();
 document.addEventListener('visibilitychange', () => {
+  if (lockCfg.enabled) {
+    if (document.visibilityState === 'hidden') {
+      lockUI.hiddenAt = Date.now();
+      if (+lockCfg.delay === 0) lockNow();
+    } else if (lockUI.mode !== 'unlock' && Date.now() - lockUI.hiddenAt >= lockCfg.delay * 60000) lockNow();
+    else if (lockUI.mode === 'unlock' && lockCfg.credId) setTimeout(() => bioUnlock(true), 300);
+  }
   if (document.visibilityState === 'hidden' && cloudOn() && cloudState.pending) cloudPush();
   if (document.visibilityState === 'visible' && cloudOn() && Date.now() - cloudState.lastCheck > 60000) cloudCheck();
   if (document.visibilityState === 'visible' && currentMonth() !== lastActiveMonth) {
@@ -2119,7 +2357,9 @@ document.addEventListener('visibilitychange', () => {
    Inicio
    ========================================================= */
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+if (lockCfg.enabled) showLock('unlock');
 render();
+bioAvailable().then((ok) => { lockUI.bioAvail = ok; if (ui.tab === 'ajustes') render(); });
 if (cloudOn()) cloudCheck();
 window.addEventListener('online', () => { if (cloudOn() && cloudState.status === 'error') cloudCheck(); });
 
