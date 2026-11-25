@@ -451,3 +451,13 @@ body.is-locked .topbar, body.is-locked main, body.is-locked .tabbar, body.is-loc
 .lock-foot { display: grid; gap: 10px; margin-top: 18px; }
 .lock-foot .link { color: var(--accent); font-size: 15px; font-weight: 500; }
 @media (max-height: 640px) { .key { width: 64px; height: 64px; font-size: 26px; } .keypad { grid-template-columns: repeat(3, 64px); gap: 12px 20px; } }
+
+/* ===== Tarjetas de crédito ===== */
+.card-debt { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+.tag.pago::before { background: var(--ink-3); }
+.split-line { padding: 8px 2px; border-bottom: 1px solid var(--hair); font-size: 15px; gap: 10px; }
+.split-box { background: var(--card-2); border-radius: 14px; padding: 12px; margin-bottom: 14px; }
+.split-box p { font-size: 15px; margin-bottom: 8px; }
+.split-row { display: grid; grid-template-columns: 1fr 110px 36px; gap: 6px; align-items: center; margin-top: 6px; }
+.split-row .select, .split-row .input { min-height: 42px; background: var(--card); font-size: 15px; padding: 8px 10px; }
+.split-row .icon-btn { width: 36px; height: 36px; font-size: 16px; color: var(--ink-3); }

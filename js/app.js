@@ -49,6 +49,7 @@ function defaultCategories() {
     g('c-internet', '📱', 'Internet y telefonía', 'fijo'),
     g('c-suscripciones', '📺', 'Suscripciones', 'fijo'),
     g('c-creditos', '🏦', 'Créditos y deudas', 'fijo'),
+    g('c-intereses', '🧾', 'Intereses y comisiones', 'fijo'),
     g('c-educacion', '🎓', 'Educación', 'fijo'),
     g('c-super', '🛒', 'Supermercado', 'variable'),
     g('c-transporte', '🚗', 'Transporte', 'variable'),
@@ -81,7 +82,7 @@ function guessCurrency() {
 
 function freshDB() {
   return {
-    version: 2,
+    version: 3,
     updatedAt: '',
     settings: {
       currency: guessCurrency(), theme: 'auto', name: '', savingsGoalPct: 20, onboarded: false,
@@ -92,6 +93,7 @@ function freshDB() {
     fixed: [],
     goals: [],
     credits: [],
+    cards: [],
   };
 }
 
@@ -103,7 +105,7 @@ const arr = (x) => (Array.isArray(x) ? x : []);
 function normalize(d) {
   const base = freshDB();
   const out = {
-    version: 2,
+    version: 3,
     updatedAt: (d && d.updatedAt) || '',
     settings: { ...base.settings, ...(d && d.settings) },
     categories: Array.isArray(d && d.categories) ? d.categories : base.categories,
@@ -111,7 +113,12 @@ function normalize(d) {
     fixed: arr(d && d.fixed),
     goals: arr(d && d.goals).map((g) => ({ ...g })),
     credits: arr(d && d.credits),
+    cards: arr(d && d.cards),
   };
+  // v2 → v3: categoría para intereses y comisiones de tarjetas
+  if (!out.categories.some((c) => c.id === 'c-intereses')) {
+    out.categories.push({ id: 'c-intereses', emoji: '🧾', name: 'Intereses y comisiones', type: 'egreso', kind: 'fijo', budget: 0 });
+  }
   // v1 → v2: los aportes a metas pasan a ser movimientos de ahorro
   for (const g of out.goals) {
     if (!Array.isArray(g.contributions)) continue;
@@ -151,7 +158,7 @@ function writeLocal() {
     toast('⚠️ No se pudo guardar. Exporta un respaldo.');
   }
 }
-const hasData = () => !!(db.transactions.length || db.fixed.length || db.goals.length || db.credits.length);
+const hasData = () => !!(db.transactions.length || db.fixed.length || db.goals.length || db.credits.length || db.cards.length);
 
 /* =========================================================
    Utilidades
@@ -248,31 +255,86 @@ const savingValue = (t) => (t.withdraw ? -t.amount : t.amount);
 
 function monthStats(key, untilDay = 31) {
   const txs = db.transactions.filter((t) => t.date && t.date.startsWith(key) && +t.date.slice(8, 10) <= untilDay);
-  let ingresos = 0, gastos = 0, ahorro = 0, hormigaCount = 0;
+  let ingresos = 0, gastos = 0, ahorro = 0, hormigaCount = 0, conTarjeta = 0, pagosTarjeta = 0;
   const byKind = { fijo: 0, variable: 0, hormiga: 0 };
   const byCat = {};
   for (const t of txs) {
     if (t.type === 'ingreso') { ingresos += t.amount; continue; }
     if (t.type === 'ahorro') { if (!t.opening) ahorro += savingValue(t); continue; }
+    if (t.type === 'pago') { pagosTarjeta += t.amount; continue; }
     gastos += t.amount;
+    if (t.cardId) conTarjeta += t.amount;
     const k = KINDS[t.kind] ? t.kind : 'variable';
     byKind[k] += t.amount;
     if (k === 'hormiga') hormigaCount++;
     byCat[t.categoryId] = (byCat[t.categoryId] || 0) + t.amount;
   }
-  return { key, txs, ingresos, gastos, ahorro, neto: ingresos - gastos, balance: ingresos - gastos - ahorro, byKind, byCat, hormigaCount };
+  // balance = dinero que realmente entró y salió (las compras con tarjeta salen al pagar la tarjeta)
+  return {
+    key, txs, ingresos, gastos, ahorro, conTarjeta, pagosTarjeta, neto: ingresos - gastos,
+    balance: ingresos - (gastos - conTarjeta) - pagosTarjeta - ahorro, byKind, byCat, hormigaCount,
+  };
 }
 
-// Saldo disponible: saldo inicial + ingresos − gastos − lo que se aparta como ahorro
+// Saldo disponible: saldo inicial + ingresos − gastos pagados − pagos de tarjeta − ahorro
 function balanceUntil(key) {
   let b = +db.settings.initialBalance || 0;
   for (const t of db.transactions) {
     if (t.date.slice(0, 7) > key) continue;
     if (t.type === 'ingreso') b += t.amount;
-    else if (t.type === 'egreso') b -= t.amount;
+    else if (t.type === 'egreso') { if (!t.cardId) b -= t.amount; }
+    else if (t.type === 'pago') b -= t.amount;
     else if (t.type === 'ahorro' && !t.opening) b -= savingValue(t);
   }
   return b;
+}
+
+/* ---------- Tarjetas de crédito ---------- */
+const cardById = (id) => db.cards.find((c) => c.id === id);
+const cardName = (id) => { const c = cardById(id); return c ? c.name : 'Tarjeta eliminada'; };
+function cardDebt(card, untilDate = '9999-12-31') {
+  let d = 0;
+  for (const t of db.transactions) {
+    if (t.cardId !== card.id || t.date > untilDate) continue;
+    if (t.type === 'egreso') d += t.amount;
+    else if (t.type === 'pago') d -= t.amount;
+  }
+  return round2(d);
+}
+const cardPayments = (card) => db.transactions.filter((t) => t.type === 'pago' && t.cardId === card.id).sort(byDateDesc);
+const cardChargedIn = (card, key) => db.transactions.reduce((s, t) => (t.type === 'egreso' && t.cardId === card.id && t.date.startsWith(key) ? s + t.amount : s), 0);
+const totalCardDebt = () => db.cards.reduce((s, c) => s + Math.max(0, cardDebt(c)), 0);
+// Lo cargado desde el último pago (y lo que quedó pendiente de antes)
+function cardStatement(card) {
+  const last = cardPayments(card)[0];
+  const since = last ? last.date : '';
+  const prev = last ? Math.max(0, cardDebt(card, since)) : 0;
+  const charges = db.transactions.filter((t) => t.type === 'egreso' && t.cardId === card.id && t.date > since).sort(byDateDesc);
+  return { last, prev, charges };
+}
+
+// Los cargos automáticos (suscripciones y cuotas) se registran solos en la tarjeta el día que corresponde
+function autoChargeCards() {
+  if (!db.cards.length || (sheetCtx && sheetCtx.kind === 'conflict')) return 0;
+  const key = currentMonth();
+  const today = new Date().getDate();
+  const dateFor = (day) => `${key}-${pad(Math.min(day || 1, daysInMonth(key)))}`;
+  let n = 0;
+  for (const f of db.fixed) {
+    if (f.type !== 'egreso' || !f.cardId || f.active === false || !cardById(f.cardId) || f.skip === key) continue;
+    if ((f.day || 1) > today || db.transactions.some((t) => t.fixedId === f.id && t.date.startsWith(key))) continue;
+    db.transactions.push({ id: uid(), created: Date.now(), type: 'egreso', kind: 'fijo', categoryId: f.categoryId, amount: f.amount, date: dateFor(f.day), note: f.name, fixedId: f.id, cardId: f.cardId });
+    n++;
+  }
+  for (const c of db.credits) {
+    if (!c.cardId || !cardById(c.cardId) || c.skip === key || key < c.firstMonth || creditLeft(c) <= 0) continue;
+    if ((c.day || 1) > today || creditTxIn(c, key)) continue;
+    const k = creditPaid(c) + 1;
+    db.transactions.push({ id: uid(), created: Date.now(), type: 'egreso', kind: 'fijo', categoryId: c.categoryId, amount: c.cuota, date: dateFor(c.day), note: `${c.name} · cuota ${k} de ${c.n}`, creditId: c.id, cardId: c.cardId });
+    n++;
+  }
+  if (n) save();
+  return n;
 }
 function savedUntil(key) {
   return db.transactions.reduce((s, t) => (t.type === 'ahorro' && t.date.slice(0, 7) <= key ? s + savingValue(t) : s), 0);
@@ -361,9 +423,14 @@ function applyTheme() {
 
 /* ---------- Componentes ---------- */
 function txItem(t) {
-  const sub = [t.note ? esc(t.note) : '', fmtDateShort.format(parseISO(t.date))].filter(Boolean).join(' · ');
+  const sub = [t.note ? esc(t.note) : '', t.cardId && t.type === 'egreso' ? `💳 ${esc(cardName(t.cardId))}` : '', fmtDateShort.format(parseISO(t.date))].filter(Boolean).join(' · ');
   let emoji, title, tag = '', amt;
-  if (t.type === 'ahorro') {
+  if (t.type === 'pago') {
+    emoji = '💳';
+    title = `Pago ${cardName(t.cardId)}`;
+    tag = '<span class="tag pago">Pago tarjeta</span>';
+    amt = `<span class="amt">−${money(t.amount)}</span>`;
+  } else if (t.type === 'ahorro') {
     const g = goalById(t.goalId);
     emoji = g ? g.emoji || '🎯' : '🐷';
     title = (t.withdraw ? 'Retiro de ahorro' : 'Ahorro') + (g ? ` · ${g.name}` : '');
@@ -427,13 +494,17 @@ function renderInicio() {
   html += `<section class="card hero">
     <div class="label">Saldo disponible${isCurrent ? '' : ` <span class="muted small">al cierre de ${esc(monthShort(key))}</span>`}</div>
     <div class="value num ${saldo < 0 ? 'neg' : ''}">${money(saldo)}</div>
-    <div class="meta"><span>Balance de ${esc(monthName(key))}: <b class="num ${m.balance < 0 ? 'neg' : 'pos'}">${m.balance > 0 ? '+' : ''}${money(m.balance)}</b></span></div>
-    <p class="note">Ingresos − gastos − lo que apartas como ahorro${ib ? `, partiendo de un saldo inicial de ${money(ib)}` : ''}.
+    <div class="meta"><span>Balance de ${esc(monthName(key))}: <b class="num ${m.balance < 0 ? 'neg' : 'pos'}">${m.balance > 0 ? '+' : ''}${money(m.balance)}</b></span>
+      ${totalCardDebt() > 0 ? `<span>💳 Por pagar en tarjetas: <b class="num">${money(totalCardDebt())}</b></span>` : ''}</div>
+    <p class="note">Ingresos − gastos − lo que apartas como ahorro${db.cards.length ? '. Las compras con tarjeta se descuentan cuando pagas la tarjeta' : ''}${ib ? `, partiendo de un saldo inicial de ${money(ib)}` : ''}.
       <button class="link inline" data-action="edit-initial">${ib ? 'Editar saldo inicial' : '¿Ya tenías dinero? Agrega tu saldo inicial'}</button></p>
   </section>`;
 
   // Ahorro: del mes y total a la fecha
   html += renderSavingsCard(key, m, goalPct);
+
+  // Tarjetas de crédito
+  html += renderCardsCard(key);
 
   // Tiles
   const delta = (cur, before, upIsGood) => {
@@ -566,6 +637,12 @@ function insights(key, m, prev, goalPct) {
   if (isCurrent && pendingN) {
     out.push(['📅', `Tienes ${pendingN} ${pendingN === 1 ? 'pago pendiente' : 'pagos pendientes'} (fijos y cuotas) por <b>${money(pendingAmt)}</b>.`]);
   }
+  const owed = db.cards.map((c) => [c, cardDebt(c)]).filter(([, d]) => d > 0);
+  if (owed.length) {
+    const total = owed.reduce((s, [, d]) => s + d, 0);
+    const next = owed.filter(([c]) => c.dueDay).sort((a, b) => a[0].dueDay - b[0].dueDay)[0];
+    out.push(['💳', `Debes <b>${money(total)}</b> en ${owed.length === 1 ? esc(owed[0][0].name) : 'tus tarjetas'}${next ? `. ${esc(next[0].name)} se paga el día ${next[0].dueDay} (${money(next[1])})` : ''}.`]);
+  }
   const act = db.credits.filter((c) => creditLeft(c) > 0);
   if (act.length) {
     const monthly = act.reduce((s, c) => s + c.cuota, 0);
@@ -625,10 +702,13 @@ function creditBlock(c, key) {
       : `Quedan ${left} · ${money(left * c.cuota)} por pagar. Termina en ${esc(monthLabel(creditEnd(c)))}.`;
   let action = '';
   if (key < c.firstMonth) action = `<span class="small muted">Primera cuota en ${esc(monthLabel(c.firstMonth))}</span>`;
-  else if (txIn || left > 0) action = `<button class="check ${txIn ? 'on' : ''}" data-action="toggle-credit" data-id="${esc(c.id)}">${txIn ? '✓ Pagada este mes' : `Pagar cuota ${paid + 1}`}</button>`;
+  else if (txIn || left > 0) {
+    const label = c.cardId ? (txIn ? `✓ Cargada a ${cardName(c.cardId)}` : `Cargar cuota ${paid + 1}`) : txIn ? '✓ Pagada este mes' : `Pagar cuota ${paid + 1}`;
+    action = `<button class="check ${txIn ? 'on' : ''}" data-action="toggle-credit" data-id="${esc(c.id)}">${esc(label)}</button>`;
+  }
   return `<div class="credit">
     <button class="credit-main" data-action="edit-credit" data-id="${esc(c.id)}">
-      <div class="credit-top"><span class="credit-name">${esc(c.name)}</span><span class="badge">${info.icon} ${esc(c.lender || info.label)}</span></div>
+      <div class="credit-top"><span class="credit-name">${esc(c.name)}</span><span class="badge">${info.icon} ${esc(c.cardId ? cardName(c.cardId) : c.lender || info.label)}</span></div>
       <div class="small muted" style="margin-top:2px">${interest}${c.note ? ` · ${esc(c.note)}` : ''}</div>
       ${bar}
       <div class="credit-line">${paid ? `Cuota <b>${paid} de ${c.n}</b>` : `<b>${c.n} cuotas</b>`} · ${money(c.cuota)}</div>
@@ -648,6 +728,28 @@ function renderCreditsCard(key) {
     ${act.slice(0, 3).map((c) => creditBlock(c, key)).join('')}
     ${act.length > 3 ? `<div class="btn-row"><button class="btn sm" data-action="go" data-tab="fijos">Ver ${act.length - 3} más</button></div>` : ''}
   </section>`;
+}
+
+function cardBlock(card, key) {
+  const debt = cardDebt(card);
+  const month = cardChargedIn(card, key);
+  const last = cardPayments(card)[0];
+  return `<div class="credit">
+    <div class="credit-top"><span class="credit-name">💳 ${esc(card.name)}</span>${card.dueDay ? `<span class="badge">Se paga el día ${card.dueDay}</span>` : ''}
+      <span class="spacer"></span><button class="link inline" data-action="edit-card" data-id="${esc(card.id)}">Editar</button></div>
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div><div class="small muted">Por pagar</div><div class="card-debt num">${money(Math.max(0, debt))}</div></div><span class="spacer"></span>
+      <div style="text-align:right"><div class="small muted">Cargado en ${esc(monthShort(key))}</div><div class="num" style="font-weight:600">${money(month)}</div></div>
+    </div>
+    ${debt < 0 ? `<div class="small muted">Saldo a favor: ${money(-debt)}</div>` : ''}
+    <div class="small muted" style="margin-top:4px">${last ? `Último pago: ${money(last.amount)} el ${esc(fmtDateShort.format(parseISO(last.date)))}` : 'Aún no registras pagos de esta tarjeta'}</div>
+    <div class="btn-row"><button class="btn sm" data-action="filter-card" data-id="${esc(card.id)}">Ver cargos</button><button class="btn sm primary" data-action="pay-card" data-id="${esc(card.id)}">Pagar tarjeta</button></div>
+  </div>`;
+}
+function renderCardsCard(key) {
+  if (!db.cards.length) return '';
+  return `<section class="card"><div class="card-head"><h2>💳 Tarjetas de crédito</h2><span class="small muted">Total: <b class="num">${money(totalCardDebt())}</b></span></div>
+    ${db.cards.map((c) => cardBlock(c, key)).join('')}</section>`;
 }
 
 function renderHormigaCard(m) {
@@ -697,14 +799,15 @@ function fixedEmoji(f) {
 function fixedRow({ f, tx }) {
   const isIn = f.type === 'ingreso';
   const isSav = f.type === 'ahorro';
-  const doneLabel = isSav ? '✓ Ahorrado' : isIn ? '✓ Recibido' : '✓ Pagado';
-  const todoLabel = isSav ? 'Ahorrar' : isIn ? 'Recibir' : 'Pagar';
+  const onCard = f.type === 'egreso' && f.cardId;
+  const doneLabel = isSav ? '✓ Ahorrado' : isIn ? '✓ Recibido' : onCard ? '✓ Cargado' : '✓ Pagado';
+  const todoLabel = isSav ? 'Ahorrar' : isIn ? 'Recibir' : onCard ? 'Cargar' : 'Pagar';
   const g = isSav ? goalById(f.goalId) : null;
   return `<div class="item">
     <button class="emoji" data-action="edit-fixed" data-id="${esc(f.id)}" aria-label="Editar ${esc(f.name)}">${esc(fixedEmoji(f))}</button>
     <button class="main" style="text-align:left" data-action="edit-fixed" data-id="${esc(f.id)}">
       <div class="t1">${esc(f.name)}</div>
-      <div class="t2"><span class="num ${isIn ? 'pos' : ''}" style="color:${isIn ? '' : 'var(--ink-1)'};font-weight:600">${money(tx ? tx.amount : f.amount)}</span> · día ${f.day || 1}${g ? ` · ${esc(g.name)}` : ''}</div></button>
+      <div class="t2"><span class="num ${isIn ? 'pos' : ''}" style="color:${isIn ? '' : 'var(--ink-1)'};font-weight:600">${money(tx ? tx.amount : f.amount)}</span> · día ${f.day || 1}${g ? ` · ${esc(g.name)}` : ''}${onCard ? ` · 💳 ${esc(cardName(f.cardId))}` : ''}</div></button>
     <button class="check ${tx ? 'on' : ''}" data-action="toggle-fixed" data-id="${esc(f.id)}">${tx ? doneLabel : todoLabel}</button>
   </div>`;
 }
@@ -768,10 +871,12 @@ function renderTrendCard(key) {
    Vista: Movimientos
    ========================================================= */
 const FILTERS = [
-  ['all', 'Todos'], ['ingreso', 'Ingresos'], ['egreso', 'Gastos'], ['ahorro', '🐷 Ahorro'], ['cuota', '💳 Cuotas'],
+  ['all', 'Todos'], ['ingreso', 'Ingresos'], ['egreso', 'Gastos'], ['ahorro', '🐷 Ahorro'], ['tarjeta', '💳 Con tarjeta'], ['cuota', 'Cuotas'],
   ['fijo', 'Fijos'], ['variable', 'Variables'], ['hormiga', '🐜 Hormiga'],
 ];
 function txSearchText(t) {
+  if (t.type === 'pago') return `pago tarjeta ${cardName(t.cardId)} ${t.note || ''} ${t.amount}`.toLowerCase();
+  if (t.cardId) return `${catById(t.categoryId).name} ${cardName(t.cardId)} ${t.note || ''} ${t.amount}`.toLowerCase();
   const name = t.type === 'ahorro' ? `ahorro ${(goalById(t.goalId) || {}).name || ''}` : catById(t.categoryId).name;
   return `${name} ${t.note || ''} ${t.amount}`.toLowerCase();
 }
@@ -784,10 +889,12 @@ function filteredTxs() {
     .filter((t) => {
       if (f.type === 'ingreso' || f.type === 'egreso' || f.type === 'ahorro') return t.type === f.type;
       if (f.type === 'cuota') return !!t.creditId;
+      if (f.type === 'tarjeta') return !!t.cardId;
       if (KINDS[f.type]) return t.type === 'egreso' && t.kind === f.type;
       return true;
     })
     .filter((t) => !f.cat || t.categoryId === f.cat)
+    .filter((t) => !f.card || t.cardId === f.card)
     .filter((t) => !q || txSearchText(t).includes(q))
     .sort(byDateDesc);
 }
@@ -800,6 +907,8 @@ function renderMovimientos() {
       ${FILTERS.map(([k, l]) => `<button class="chip ${ui.filter.type === k ? 'on' : ''}" data-action="filter" data-type="${k}">${l}</button>`).join('')}
     </div>
     ${cat ? `<div class="chips" style="margin-bottom:10px"><button class="chip on" data-action="clear-cat">${esc(cat.emoji)} ${esc(cat.name)} ✕</button></div>` : ''}
+    ${ui.filter.card ? `<div class="chips" style="margin-bottom:10px"><button class="chip on" data-action="clear-card">💳 ${esc(cardName(ui.filter.card))} ✕</button>
+      ${cardById(ui.filter.card) ? `<button class="chip" data-action="pay-card" data-id="${esc(ui.filter.card)}">Pagar tarjeta</button>` : ''}</div>` : ''}
     <div id="txList">${renderTxList()}</div>`;
 }
 
@@ -818,7 +927,7 @@ function renderTxList() {
       <span>${txs.length} movimientos</span><span class="spacer"></span>
       ${inc ? `<span class="pos num">+${money(inc)}</span>` : ''}${out ? `<span class="num">−${money(out)}</span>` : ''}${sav ? `<span class="num">🐷 ${money(sav)}</span>` : ''}</div>
     ${Object.entries(groups).map(([date, list]) => {
-      const net = list.reduce((s, t) => s + (t.type === 'ingreso' ? t.amount : t.type === 'egreso' ? -t.amount : t.opening ? 0 : -savingValue(t)), 0);
+      const net = list.reduce((s, t) => s + (t.type === 'ingreso' ? t.amount : t.type === 'egreso' ? -t.amount : t.type === 'pago' || t.opening ? 0 : -savingValue(t)), 0);
       return `<div class="day-head"><span>${esc(dayLabel(date))}</span><span class="num">${money(net)}</span></div>
         <div class="card" style="padding:2px 14px"><div class="list">${list.map(txItem).join('')}</div></div>`;
     }).join('')}`;
@@ -858,6 +967,12 @@ function renderFijos() {
     ${pendingOut.length ? `<div class="btn-row"><button class="btn" data-action="pay-all">Marcar todos los fijos como pagados</button></div>` : ''}
     <p class="note">Toca “Pagar” para registrar el pago de ${esc(monthName(key))} como gasto. Toca el nombre para editar.</p>
   </section>`;
+  html += `<h3 class="section-title">Tarjetas de crédito</h3>`;
+  html += db.cards.length
+    ? `<section class="card">${db.cards.map((c) => cardBlock(c, key)).join('')}
+        <div class="btn-row"><button class="btn sm" data-action="new-card">+ Agregar tarjeta</button></div></section>`
+    : `<section class="card"><p class="sub">Agrega tus tarjetas (Visa, Mastercard, CMR…) para anotar en qué gastas con cada una y, al pagarlas, saber exactamente qué estás pagando.</p>
+        <div class="btn-row"><button class="btn" data-action="new-card">+ Agregar tarjeta</button></div></section>`;
   html += `<h3 class="section-title">Compras en cuotas</h3>`;
   html += active.length
     ? `<section class="card">${active.map((c) => creditBlock(c, key)).join('')}</section>`
@@ -957,6 +1072,14 @@ function renderAjustes() {
       <div class="seg">${[['auto', 'Automática'], ['light', 'Clara'], ['dark', 'Oscura']].map(([k, l]) => `<button class="${s.theme === k ? 'on' : ''}" data-action="theme" data-v="${k}">${l}</button>`).join('')}</div></div>
   </section>
 
+  <h3 class="section-title">Tarjetas de crédito</h3>
+  <section class="card settings-list" style="padding:4px 14px">
+    ${db.cards.length ? `<div class="list">${db.cards.map((c) => `<button class="item" data-action="edit-card" data-id="${esc(c.id)}"><span class="emoji">💳</span>
+      <span class="main"><div class="t1">${esc(c.name)}</div><div class="t2">Por pagar ${money(Math.max(0, cardDebt(c)))}${c.dueDay ? ` · se paga el día ${c.dueDay}` : ''}</div></span><span class="chev">›</span></button>`).join('')}</div>`
+      : '<p class="muted" style="padding:12px 0">Aún no agregas tarjetas.</p>'}
+  </section>
+  <div class="btn-row"><button class="btn block" data-action="new-card">+ Agregar tarjeta</button></div>
+
   <h3 class="section-title">Categorías de gasto y presupuestos</h3>
   <section class="card settings-list" style="padding:4px 14px"><div class="list">${catList('egreso')}</div></section>
   <h3 class="section-title">Categorías de ingreso</h3>
@@ -1017,6 +1140,15 @@ function sheetHead(title, saveAction, saveLabel = 'Guardar') {
 const val = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
 const amountStr = (n) => (n ? String(n) : '');
 
+/* ---------- Forma de pago ---------- */
+function payWithChips(selected, action, label) {
+  return `<div class="field"><span class="lbl">${esc(label)}</span><div class="chips" style="flex-wrap:wrap">
+    <button class="chip ${!selected ? 'on' : ''}" data-action="${action}" data-id="">💵 Efectivo / débito</button>
+    ${db.cards.map((c) => `<button class="chip ${selected === c.id ? 'on' : ''}" data-action="${action}" data-id="${esc(c.id)}">💳 ${esc(c.name)}</button>`).join('')}
+    <button class="chip" data-action="new-card" data-from="${action}">＋ Tarjeta</button>
+  </div>${selected ? `<div class="note" style="margin-top:2px">${action === 'fx-card' ? 'Se cargará sola a la tarjeta cada mes el día indicado.' : 'Se suma a lo que debes en la tarjeta. Se descuenta de tu saldo cuando pagas la tarjeta.'}</div>` : ''}</div>`;
+}
+
 /* ---------- Movimiento ---------- */
 function openTxSheet(opts = {}) {
   const existing = opts.id ? db.transactions.find((t) => t.id === opts.id) : null;
@@ -1035,6 +1167,7 @@ function openTxSheet(opts = {}) {
     repeat: false,
     fixedId: existing ? existing.fixedId || null : null,
     creditId: existing ? existing.creditId || null : null,
+    cardId: existing ? existing.cardId || '' : opts.cardId || '',
     goalId: existing ? existing.goalId || '' : opts.goalId || '',
     withdraw: existing ? !!existing.withdraw : !!opts.withdraw,
     opening: existing ? !!existing.opening : false,
@@ -1085,7 +1218,8 @@ function drawTxSheet(focus) {
       <label class="switch"><input type="checkbox" id="txOpening" ${d.opening ? 'checked' : ''}><span></span></label></div>` : ''}`
     : `${isOut ? `<div class="field"><span class="lbl">Tipo de gasto</span><div class="seg">
       ${KIND_ORDER.map((k) => `<button class="${d.expKind === k ? 'on' : ''}" data-action="tx-kind" data-v="${k}">${k === 'hormiga' ? '🐜 ' : ''}${KINDS[k].label}</button>`).join('')}
-    </div><div class="note" style="margin-top:2px">${KINDS[d.expKind].hint}</div></div>` : ''}
+    </div><div class="note" style="margin-top:2px">${KINDS[d.expKind].hint}</div></div>
+    ${payWithChips(d.cardId, 'tx-card', 'Pagado con')}` : ''}
     <div class="field"><span class="lbl">Categoría</span><div class="cat-grid">
       ${cats.map((c) => `<button class="cat-opt ${c.id === d.categoryId ? 'on' : ''}" data-action="tx-cat" data-id="${esc(c.id)}"><span class="e">${esc(c.emoji)}</span>${esc(c.name)}</button>`).join('')}
       <button class="cat-opt" data-action="new-cat" data-type="${d.type}"><span class="e">＋</span>Nueva</button>
@@ -1119,6 +1253,7 @@ function saveTx() {
     type: d.type, amount, date: d.date, note: d.note.trim(),
     categoryId: isSav ? undefined : d.categoryId,
     kind: d.type === 'egreso' ? d.expKind : undefined,
+    cardId: d.type === 'egreso' && d.cardId ? d.cardId : undefined,
     goalId: isSav && d.goalId ? d.goalId : undefined,
     withdraw: isSav && d.withdraw ? true : undefined,
     opening: isSav && !d.withdraw && d.opening ? true : undefined,
@@ -1132,7 +1267,7 @@ function saveTx() {
     if (d.repeat && !data.withdraw && !data.opening) {
       const g = goalById(d.goalId);
       const name = d.note.trim() || (isSav ? (g ? `Ahorro ${g.name}` : 'Ahorro mensual') : catById(d.categoryId).name);
-      const f = { id: uid(), name, type: d.type, amount, categoryId: data.categoryId || '', goalId: data.goalId, day: parseISO(d.date).getDate(), active: true };
+      const f = { id: uid(), name, type: d.type, amount, categoryId: data.categoryId || '', goalId: data.goalId, cardId: data.cardId, day: parseISO(d.date).getDate(), active: true };
       db.fixed.push(f);
       t.fixedId = f.id;
       if (d.type === 'egreso') t.kind = 'fijo';
@@ -1155,7 +1290,7 @@ function openFixedSheet(id) {
   const type = f ? f.type : 'egreso';
   const fixedCat = catsOfType(type).find((c) => c.kind === 'fijo') || catsOfType(type)[0];
   sheetCtx = {
-    kind: 'fixed', id: f ? f.id : null, type, goalId: f ? f.goalId || '' : '',
+    kind: 'fixed', id: f ? f.id : null, type, goalId: f ? f.goalId || '' : '', cardId: f ? f.cardId || '' : '',
     categoryId: f ? f.categoryId : fixedCat ? fixedCat.id : '',
     name: f ? f.name : '', amount: f ? amountStr(f.amount) : '', day: f ? f.day : 1,
     active: f ? f.active !== false : true,
@@ -1188,6 +1323,7 @@ function drawFixedSheet() {
     </div></div>` : `<div class="field"><span class="lbl">Categoría</span><div class="cat-grid">
       ${catsOfType(d.type).map((c) => `<button class="cat-opt ${c.id === d.categoryId ? 'on' : ''}" data-action="fx-cat" data-id="${esc(c.id)}"><span class="e">${esc(c.emoji)}</span>${esc(c.name)}</button>`).join('')}
     </div></div>`}
+    ${isOut ? payWithChips(d.cardId, 'fx-card', 'Se paga con') : ''}
     ${d.id ? `<div class="switch-row"><span><b>Activo</b><br><span class="small muted">Desactívalo para pausarlo sin borrarlo</span></span>
       <label class="switch"><input type="checkbox" id="fxActive" ${d.active ? 'checked' : ''}><span></span></label></div>` : ''}
     <div class="btn-row"><button class="btn primary" data-action="save-fixed">Guardar</button></div>
@@ -1202,12 +1338,15 @@ function saveFixed() {
   if (!(amount > 0)) { toast('Ingresa un monto válido'); return; }
   const day = Math.min(31, Math.max(1, parseInt(d.day, 10) || 1));
   const isSav = d.type === 'ahorro';
-  const data = { name: d.name.trim(), type: d.type, amount, categoryId: isSav ? '' : d.categoryId, goalId: isSav && d.goalId ? d.goalId : undefined, day, active: d.active };
+  const data = {
+    name: d.name.trim(), type: d.type, amount, categoryId: isSav ? '' : d.categoryId, goalId: isSav && d.goalId ? d.goalId : undefined,
+    cardId: d.type === 'egreso' && d.cardId ? d.cardId : undefined, day, active: d.active,
+  };
   let f;
   if (d.id) { f = db.fixed.find((x) => x.id === d.id); Object.assign(f, data); }
   else { f = { id: uid(), ...data }; db.fixed.push(f); }
   Object.keys(f).forEach((k) => f[k] === undefined && delete f[k]);
-  save(); closeSheet(); render();
+  save(); closeSheet(); autoChargeCards(); render();
   toast('Guardado');
 }
 function toggleFixed(id, key = ui.month) {
@@ -1216,13 +1355,15 @@ function toggleFixed(id, key = ui.month) {
   const tx = db.transactions.find((t) => t.fixedId === id && t.date.startsWith(key));
   if (tx) {
     db.transactions = db.transactions.filter((t) => t !== tx);
+    if (f.cardId && key === currentMonth()) f.skip = key; // no volver a cargarlo solo este mes
   } else {
+    if (f.skip === key) delete f.skip;
     const t = {
       id: uid(), created: Date.now(), type: f.type, amount: f.amount,
       date: `${key}-${pad(Math.min(f.day || 1, daysInMonth(key)))}`, note: f.name, fixedId: f.id,
     };
     if (f.type === 'ahorro') { if (f.goalId) t.goalId = f.goalId; }
-    else { t.categoryId = f.categoryId; if (f.type === 'egreso') t.kind = 'fijo'; }
+    else { t.categoryId = f.categoryId; if (f.type === 'egreso') { t.kind = 'fijo'; if (f.cardId) t.cardId = f.cardId; } }
     db.transactions.push(t);
   }
   save(); render();
@@ -1280,7 +1421,10 @@ function openInitialSheet() {
 function openCreditSheet(id, preset = {}) {
   const c = id ? db.credits.find((x) => x.id === id) : null;
   const defCat = db.categories.find((x) => x.id === 'c-creditos') || catsOfType('egreso')[0];
-  sheetCtx = { kind: 'credit', id: c ? c.id : null, ckind: c ? c.kind : 'tarjeta', withInterest: c ? c.rate > 0 : false, manual: c ? !!c.cuotaManual : false };
+  sheetCtx = {
+    kind: 'credit', id: c ? c.id : null, ckind: c ? c.kind : 'tarjeta', withInterest: c ? c.rate > 0 : false, manual: c ? !!c.cuotaManual : false,
+    lender: c ? c.lender || '' : '', cardId: c ? c.cardId || '' : preset.cardId || '',
+  };
   drawCreditSheet(c ? { ...c, total: amountStr(c.total), cuota: amountStr(c.cuota), rate: c.rate ? fmtRate(c.rate) : '' } : {
     name: preset.name || '', lender: '', total: preset.total || '', n: '', rate: '', cuota: '', firstMonth: ui.month,
     day: Math.min(new Date().getDate(), 28), paidBefore: 0, categoryId: preset.categoryId || (defCat ? defCat.id : ''), note: '',
@@ -1288,7 +1432,8 @@ function openCreditSheet(id, preset = {}) {
 }
 function readCreditForm() {
   return {
-    name: val('crName'), lender: val('crLender'), total: val('crTotal'), n: val('crN'), rate: val('crRate'),
+    name: val('crName'), lender: document.getElementById('crLender') ? val('crLender') : (sheetCtx && sheetCtx.lender) || '',
+    cardId: document.getElementById('crCard') ? val('crCard').replace('__new', '') : (sheetCtx && sheetCtx.cardId) || '', total: val('crTotal'), n: val('crN'), rate: val('crRate'),
     cuota: val('crCuota'), firstMonth: val('crFirst'), day: val('crDay'), paidBefore: val('crPaid'),
     categoryId: val('crCat'), note: val('crNote'),
   };
@@ -1306,8 +1451,13 @@ function drawCreditSheet(v) {
     </div>
     <div class="field"><label for="crName">${isCard ? '¿Qué compraste?' : '¿Para qué es el préstamo?'}</label>
       <input id="crName" class="input" value="${esc(v.name)}" placeholder="${isCard ? 'Ej: MacBook, cama, celular' : 'Ej: Auto, estudios, deudas'}"></div>
-    <div class="field"><label for="crLender">${isCard ? 'Tarjeta' : 'Banco o financiera'} <span class="muted">(opcional)</span></label>
-      <input id="crLender" class="input" value="${esc(v.lender)}" placeholder="${isCard ? 'Ej: Visa Santander' : 'Ej: BancoEstado'}"></div>
+    ${isCard ? `<div class="field"><label for="crCard">¿Con qué tarjeta?</label><select id="crCard" class="select">
+      <option value="">Sin especificar</option>
+      ${db.cards.map((c) => `<option value="${esc(c.id)}" ${v.cardId === c.id ? 'selected' : ''}>💳 ${esc(c.name)}</option>`).join('')}
+      <option value="__new">＋ Agregar tarjeta…</option></select>
+      <div class="note" style="margin-top:2px">${v.cardId ? 'Cada cuota se cargará sola a esta tarjeta el día de pago.' : 'Elige la tarjeta para que cada cuota se sume a lo que debes en ella.'}</div></div>`
+    : `<div class="field"><label for="crLender">Banco o financiera <span class="muted">(opcional)</span></label>
+      <input id="crLender" class="input" value="${esc(v.lender)}" placeholder="Ej: BancoEstado"></div>`}
     <div class="field-row">
       <div class="field"><label for="crTotal">${isCard ? 'Precio de la compra' : 'Monto del préstamo'}</label><input id="crTotal" class="input num" inputmode="decimal" value="${esc(v.total)}" placeholder="0"></div>
       <div class="field"><label for="crN">N° de cuotas</label><input id="crN" class="input num" type="number" inputmode="numeric" min="1" max="360" value="${esc(v.n)}" placeholder="Ej: 12"></div>
@@ -1379,27 +1529,207 @@ function saveCredit() {
   if (!(total > 0) && cuota > 0) total = roundMoney(cuota * n);
   if (!(cuota > 0)) { toast('Ingresa el monto o el valor de la cuota'); return; }
   const data = {
-    kind: d.ckind, name, lender: v.lender.trim(), total, n, rate, cuota, cuotaManual: d.manual,
+    kind: d.ckind, name, lender: (d.ckind === 'tarjeta' && cardById(v.cardId) ? cardById(v.cardId).name : v.lender).trim(),
+    cardId: d.ckind === 'tarjeta' && v.cardId ? v.cardId : undefined, total, n, rate, cuota, cuotaManual: d.manual,
     firstMonth: /^\d{4}-\d{2}$/.test(v.firstMonth) ? v.firstMonth : ui.month,
     day: Math.min(31, Math.max(1, parseInt(v.day, 10) || 1)),
     paidBefore: Math.min(n, Math.max(0, parseInt(v.paidBefore, 10) || 0)),
     categoryId: v.categoryId, note: v.note.trim(),
   };
-  if (d.id) Object.assign(db.credits.find((c) => c.id === d.id), data);
-  else db.credits.push({ id: uid(), created: Date.now(), ...data });
-  save(); closeSheet(); render();
+  let cr;
+  if (d.id) { cr = db.credits.find((c) => c.id === d.id); Object.assign(cr, data); }
+  else { cr = { id: uid(), created: Date.now(), ...data }; db.credits.push(cr); }
+  if (!cr.cardId) delete cr.cardId;
+  save(); closeSheet(); autoChargeCards(); render();
   toast(d.id ? 'Compra actualizada' : `Guardada: ${n} cuotas de ${money(cuota)}`);
 }
 function payCredit(c, key) {
   if (creditLeft(c) <= 0) { toast('Esta compra ya está pagada'); return; }
   const k = creditPaid(c) + 1;
-  db.transactions.push({
+  const t = {
     id: uid(), created: Date.now(), type: 'egreso', kind: 'fijo', categoryId: c.categoryId, amount: c.cuota,
     date: key === currentMonth() ? todayISO() : `${key}-${pad(Math.min(c.day || 1, daysInMonth(key)))}`,
     note: `${c.name} · cuota ${k} de ${c.n}`, creditId: c.id,
-  });
+  };
+  if (c.cardId) t.cardId = c.cardId;
+  if (c.skip === key) delete c.skip;
+  db.transactions.push(t);
   save(); render();
-  toast(k === c.n ? `🎉 ¡Terminaste de pagar ${c.name}!` : `✓ Cuota ${k} de ${c.n} pagada`);
+  toast(k === c.n ? `🎉 ¡Terminaste de pagar ${c.name}!` : c.cardId ? `✓ Cuota ${k} de ${c.n} cargada a ${cardName(c.cardId)}` : `✓ Cuota ${k} de ${c.n} pagada`);
+}
+
+/* ---------- Tarjetas de crédito ---------- */
+function openCardSheet(id, returnTo = null) {
+  const c = id ? cardById(id) : null;
+  sheetCtx = { kind: 'card', id: c ? c.id : null, returnTo };
+  const used = c ? db.transactions.filter((t) => t.cardId === c.id).length : 0;
+  openSheet(`${sheetHead(c ? 'Editar tarjeta' : 'Nueva tarjeta', 'save-card')}
+    <div class="field"><label for="cdName">Nombre de la tarjeta</label>
+      <input id="cdName" class="input" value="${esc(c ? c.name : '')}" placeholder="Ej: Visa Santander, CMR, Lider BCI" autocomplete="off"></div>
+    <div class="field"><label for="cdDue">Día de pago <span class="muted">(opcional)</span></label>
+      <input id="cdDue" class="input" type="number" inputmode="numeric" min="1" max="31" value="${esc(c && c.dueDay ? c.dueDay : '')}" placeholder="Ej: 5">
+      <div class="note" style="margin-top:2px">El día en que vence el pago de la tarjeta, para recordártelo.</div></div>
+    <div class="btn-row"><button class="btn primary" data-action="save-card">Guardar</button></div>
+    ${c ? `<div class="btn-row"><button class="btn danger" data-action="del-card">Eliminar tarjeta</button></div>
+      ${used ? `<p class="note">Tiene ${used} movimientos. Si la eliminas, esos gastos y pagos se mantienen en tu historial.</p>` : ''}` : ''}`);
+  if (!c) setTimeout(() => { const a = $('#cdName'); if (a) a.focus(); }, 60);
+}
+function saveCard() {
+  const name = val('cdName').trim();
+  if (!name) { toast('Escribe el nombre de la tarjeta'); return; }
+  if (db.cards.some((c) => c.name.toLowerCase() === name.toLowerCase() && c.id !== sheetCtx.id)) { toast('Ya tienes una tarjeta con ese nombre'); return; }
+  const due = parseInt(val('cdDue'), 10);
+  const editing = !!sheetCtx.id;
+  const data = { name, dueDay: due >= 1 && due <= 31 ? due : undefined };
+  let card;
+  if (sheetCtx.id) { card = cardById(sheetCtx.id); Object.assign(card, data); }
+  else { card = { id: 'k' + uid(), ...data }; db.cards.push(card); }
+  if (!card.dueDay) delete card.dueDay;
+  save();
+  const r = sheetCtx.returnTo;
+  if (r) {
+    sheetCtx = r.ctx;
+    sheetCtx.cardId = card.id;
+    if (r.ctx.kind === 'tx') drawTxSheet(false);
+    else if (r.ctx.kind === 'fixed') drawFixedSheet();
+    else if (r.ctx.kind === 'credit') drawCreditSheet({ ...r.v, cardId: card.id });
+    render();
+    return;
+  }
+  closeSheet(); render(); toast(editing ? 'Tarjeta actualizada' : `💳 ${name} agregada`);
+}
+
+// Pagar la tarjeta: muestra lo cargado y permite repartir lo que no estaba anotado
+function openCardPay(cardId) {
+  const card = cardById(cardId);
+  if (!card) return;
+  sheetCtx = { kind: 'cardpay', cardId, debt: Math.max(0, cardDebt(card)), splits: [] };
+  const st = cardStatement(card);
+  const groups = {};
+  for (const t of st.charges) {
+    const k = t.creditId ? '__cuotas' : t.categoryId;
+    groups[k] = (groups[k] || 0) + t.amount;
+  }
+  const rows = Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([k, v]) => {
+    const c = k === '__cuotas' ? { emoji: '🧾', name: 'Cuotas de compras' } : catById(k);
+    return `<div class="row split-line"><span aria-hidden="true">${esc(c.emoji)}</span><span class="spacer" style="flex:1">${esc(c.name)}</span><span class="num">${money(v)}</span></div>`;
+  }).join('');
+  const d = sheetCtx.debt;
+  openSheet(`${sheetHead(`Pagar ${card.name}`, 'save-cardpay', 'Pagar')}
+    <div data-cardpay>
+    <div class="kv lg" style="grid-template-columns:1fr 1fr">
+      <div><div class="k">Por pagar</div><div class="v num">${money(d)}</div></div>
+      <div><div class="k">Último pago</div><div class="v num" style="font-size:15px">${st.last ? `${money(st.last.amount)} · ${esc(fmtDateShort.format(parseISO(st.last.date)))}` : '—'}</div></div>
+    </div>
+    <h3 class="section-title">${st.charges.length ? `Lo que cargaste${st.last ? ' desde el último pago' : ''}` : 'Cargos anotados'}</h3>
+    ${st.prev > 0 ? `<div class="row split-line"><span>↩︎</span><span style="flex:1">Saldo pendiente anterior</span><span class="num">${money(st.prev)}</span></div>` : ''}
+    ${rows || '<p class="sub">No tienes compras anotadas en esta tarjeta. Escribe cuánto pagaste y repártelo por categoría para saber en qué se gastó.</p>'}
+    ${st.charges.length ? `<button class="link inline small" data-action="filter-card" data-id="${esc(card.id)}" style="margin-top:6px">Ver cada cargo →</button>` : ''}
+    <div class="field" style="margin-top:16px"><label for="cpAmount">¿Cuánto pagaste?</label>
+      <input id="cpAmount" class="input amount num" inputmode="decimal" value="${esc(amountStr(d))}" placeholder="0" aria-label="Monto pagado"></div>
+    <div id="cpDiff"></div>
+    <div class="field-row">
+      <div class="field"><label for="cpDate">Fecha</label><input id="cpDate" class="input" type="date" value="${esc(todayISO())}"></div>
+      <div class="field"><label for="cpNote">Nota</label><input id="cpNote" class="input" placeholder="Opcional"></div>
+    </div>
+    </div>
+    <div class="btn-row"><button class="btn primary" data-action="save-cardpay">Registrar pago</button></div>
+    <p class="note">El pago descuenta el dinero de tu saldo, pero no se cuenta otra vez como gasto: tus gastos ya quedaron en sus categorías.</p>`);
+  renderCardPayDiff();
+}
+function syncSplits() {
+  if (!sheetCtx || sheetCtx.kind !== 'cardpay') return;
+  sheetCtx.splits = sheetCtx.splits.map((r, i) => ({
+    cat: val(`spCat${i}`) || r.cat,
+    amount: document.getElementById(`spAmt${i}`) ? val(`spAmt${i}`) : r.amount,
+  }));
+}
+function cardPayDiff() {
+  const amount = parseAmount(val('cpAmount')) || 0;
+  return round2(amount - sheetCtx.debt);
+}
+function renderCardPayDiff() {
+  const box = $('#cpDiff');
+  if (!box) return;
+  const diff = cardPayDiff();
+  const card = cardById(sheetCtx.cardId);
+  if (diff > 0.5) {
+    const usage = {};
+    db.transactions.forEach((t) => { if (t.type === 'egreso' && t.cardId) usage[t.categoryId] = (usage[t.categoryId] || 0) + 1; });
+    const quick = [...new Set(['c-intereses', 'c-suscripciones', ...Object.entries(usage).sort((a, b) => b[1] - a[1]).map(([k]) => k), 'c-super', 'c-compras', 'c-restaurantes'])]
+      .filter((id) => db.categories.some((c) => c.id === id && c.type === 'egreso')).slice(0, 6);
+    const opts = (sel) => catsOfType('egreso').map((c) => `<option value="${esc(c.id)}" ${c.id === sel ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.name)}</option>`).join('');
+    box.innerHTML = `<div class="split-box">
+      <p><b>Pagaste ${money(diff)} más de lo anotado.</b> ¿En qué se gastó? Repártelo:</p>
+      ${sheetCtx.splits.map((r, i) => `<div class="split-row">
+        <select id="spCat${i}" class="select">${opts(r.cat)}</select>
+        <input id="spAmt${i}" class="input num" inputmode="decimal" value="${esc(r.amount)}" placeholder="0" data-split>
+        <button class="icon-btn" data-action="split-del" data-i="${i}" aria-label="Quitar">✕</button></div>`).join('')}
+      <div class="chips" style="flex-wrap:wrap;margin-top:8px">
+        ${quick.map((id) => `<button class="chip" data-action="split-add" data-id="${esc(id)}">+ ${esc(catById(id).emoji)} ${esc(catById(id).name)}</button>`).join('')}
+        <button class="chip" data-action="split-add" data-id="">+ Otra</button>
+      </div>
+      <div class="status" id="cpRemain" style="margin-top:10px"></div>
+    </div>`;
+    updateSplitRemain();
+  } else if (diff < -0.5) {
+    box.innerHTML = `<p class="note">Quedarán <b>${money(-diff)}</b> pendientes en ${esc(card.name)} para el próximo pago.</p>`;
+  } else {
+    box.innerHTML = sheetCtx.debt > 0 ? '<p class="note">✓ Pagas el total de la tarjeta.</p>' : '';
+  }
+}
+function updateSplitRemain() {
+  const el = $('#cpRemain');
+  if (!el) return;
+  const diff = cardPayDiff();
+  const assigned = sheetCtx.splits.reduce((s, r, i) => s + (parseAmount(val(`spAmt${i}`)) || 0), 0);
+  const rem = round2(diff - assigned);
+  el.innerHTML = rem > 0.5 ? `Falta asignar <b class="num">${money(rem)}</b> · si lo dejas así irá a “Otros gastos”`
+    : rem < -0.5 ? `<span class="neg">⚠︎ Asignaste ${money(-rem)} de más</span>` : '<span class="pos">✓ Todo asignado</span>';
+}
+function saveCardPay() {
+  const card = cardById(sheetCtx.cardId);
+  const amount = parseAmount(val('cpAmount'));
+  if (!(amount > 0)) { toast('Ingresa cuánto pagaste'); return; }
+  const date = val('cpDate');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast('Fecha inválida'); return; }
+  const note = val('cpNote').trim();
+  syncSplits();
+  const diff = round2(amount - sheetCtx.debt);
+  const payId = uid();
+  const parts = [];
+  if (diff > 0.5) {
+    const rows = sheetCtx.splits.map((r) => ({ cat: r.cat, amount: parseAmount(r.amount) || 0 })).filter((r) => r.amount > 0);
+    const assigned = rows.reduce((s, r) => s + r.amount, 0);
+    if (assigned > diff + 0.5) { toast(`Repartiste ${money(assigned - diff)} de más`); return; }
+    const left = round2(diff - assigned);
+    if (left > 0.5) rows.push({ cat: db.categories.some((c) => c.id === 'c-otros') ? 'c-otros' : catsOfType('egreso')[0].id, amount: left });
+    rows.forEach((r) => parts.push({
+      id: uid(), created: Date.now(), type: 'egreso', kind: catById(r.cat).kind || 'variable', categoryId: r.cat,
+      amount: round2(r.amount), date, note: note || `Detalle pago ${card.name}`, cardId: card.id, payId,
+    }));
+  }
+  db.transactions.push(...parts, { id: payId, created: Date.now() + 1, type: 'pago', cardId: card.id, amount, date, note });
+  save(); closeSheet(); ui.month = date.slice(0, 7); render();
+  const left = Math.max(0, cardDebt(card));
+  toast(`✓ Pago de ${money(amount)} a ${card.name}${parts.length ? ` · ${parts.length} ${parts.length === 1 ? 'parte' : 'partes'} anotadas` : ''}${left > 0.5 ? ` · quedan ${money(left)}` : ''}`);
+}
+
+function openPagoSheet(id) {
+  const t = db.transactions.find((x) => x.id === id);
+  if (!t) return;
+  const parts = db.transactions.filter((x) => x.payId === t.id);
+  sheetCtx = { kind: 'pago', id };
+  openSheet(`${sheetHead(`Pago ${cardName(t.cardId)}`, 'save-pago')}
+    <div class="field"><input id="pgAmount" class="input amount num" inputmode="decimal" value="${esc(amountStr(t.amount))}" aria-label="Monto"></div>
+    <div class="field-row">
+      <div class="field"><label for="pgDate">Fecha</label><input id="pgDate" class="input" type="date" value="${esc(t.date)}"></div>
+      <div class="field"><label for="pgNote">Nota</label><input id="pgNote" class="input" value="${esc(t.note || '')}" placeholder="Opcional"></div>
+    </div>
+    ${parts.length ? `<h3 class="section-title">Repartido en</h3><div class="list">${parts.map(txItem).join('')}</div>` : ''}
+    <div class="btn-row"><button class="btn primary" data-action="save-pago">Guardar</button></div>
+    <div class="btn-row"><button class="btn danger" data-action="del-pago">Eliminar pago</button></div>
+    ${parts.length ? `<p class="note">Si eliminas el pago también se eliminan las ${parts.length} partes que repartiste en él.</p>` : ''}`);
 }
 
 /* ---------- Categorías ---------- */
@@ -1477,13 +1807,13 @@ async function exportJSON() {
 }
 function exportCSV() {
   const q = (s) => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
-  const rows = [['Fecha', 'Tipo', 'Categoría', 'Clase de gasto', 'Monto', 'Nota'].map(q).join(';')];
+  const rows = [['Fecha', 'Tipo', 'Categoría', 'Clase de gasto', 'Monto', 'Nota', 'Tarjeta'].map(q).join(';')];
   [...db.transactions].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((t) => {
     const isSav = t.type === 'ahorro';
-    const tipo = isSav ? (t.withdraw ? 'Retiro de ahorro' : 'Ahorro') : t.type === 'ingreso' ? 'Ingreso' : 'Gasto';
-    const cat = isSav ? ((goalById(t.goalId) || {}).name || 'Ahorro') : catById(t.categoryId).name;
+    const tipo = t.type === 'pago' ? 'Pago de tarjeta' : isSav ? (t.withdraw ? 'Retiro de ahorro' : 'Ahorro') : t.type === 'ingreso' ? 'Ingreso' : 'Gasto';
+    const cat = t.type === 'pago' ? '' : isSav ? ((goalById(t.goalId) || {}).name || 'Ahorro') : catById(t.categoryId).name;
     const clase = t.type === 'egreso' ? (t.creditId ? 'Cuota' : (KINDS[t.kind] || KINDS.variable).label) : isSav && t.opening ? 'Ahorro previo' : '';
-    rows.push([t.date, tipo, cat, clase, String(isSav ? savingValue(t) : t.amount).replace('.', ','), t.note || ''].map(q).join(';'));
+    rows.push([t.date, tipo, cat, clase, String(isSav ? savingValue(t) : t.amount).replace('.', ','), t.note || '', t.cardId ? cardName(t.cardId) : ''].map(q).join(';'));
   });
   shareOrDownload(`mis-finanzas-${todayISO()}.csv`, '﻿' + rows.join('\r\n'), 'text/csv');
 }
@@ -1494,7 +1824,7 @@ function importJSON(file) {
       const data = JSON.parse(reader.result);
       if (!data || !Array.isArray(data.transactions)) throw new Error('formato');
       if (!confirm(`Esto reemplazará tus datos actuales por el respaldo (${data.transactions.length} movimientos). ¿Continuar?`)) return;
-      db = normalize(data); save(); render(); toast('Respaldo importado ✓');
+      db = normalize(data); save(); autoChargeCards(); render(); toast('Respaldo importado ✓');
     } catch (e) { toast('El archivo no es un respaldo válido'); }
   };
   reader.readAsText(file);
@@ -1516,6 +1846,10 @@ function sampleData() {
     ['Internet y celular', 'egreso', 45, 'c-internet', 12],
     ['Netflix + Spotify', 'egreso', 22, 'c-suscripciones', 15],
   ].map(([name, type, usd, categoryId, day]) => ({ id: uid(), name, type, amount: amt(usd), categoryId, day, active: true }));
+  const visa = { id: 'k' + uid(), name: 'Visa Santander', dueDay: 5 };
+  const master = { id: 'k' + uid(), name: 'Mastercard Falabella', dueDay: 15 };
+  d.cards = [visa, master];
+  fixed.find((f) => f.name === 'Netflix + Spotify').cardId = visa.id;
   const fondo = { id: uid(), name: 'Fondo de emergencia', emoji: '🛟', target: amt(4500), deadline: addMonths(cur, 12) };
   const vacas = { id: uid(), name: 'Vacaciones', emoji: '🏖️', target: amt(1500), deadline: addMonths(cur, 7) };
   d.goals = [fondo, vacas];
@@ -1524,8 +1858,8 @@ function sampleData() {
   d.settings.initialBalance = amt(800);
   const mkCredit = (o) => ({ id: uid(), created: Date.now(), cuotaManual: false, note: '', paidBefore: 0, categoryId: 'c-creditos', ...o, cuota: cuotaCalc(o.total, o.n, o.rate) });
   d.credits = [
-    mkCredit({ kind: 'tarjeta', name: 'Cama', lender: 'Visa', total: amt(210), n: 3, rate: 0, firstMonth: addMonths(cur, -2), day: 10, categoryId: 'c-compras', note: 'para el dormitorio' }),
-    mkCredit({ kind: 'tarjeta', name: 'MacBook', lender: 'Mastercard', total: amt(1500), n: 24, rate: 1.5, firstMonth: addMonths(cur, -1), day: 10, categoryId: 'c-compras' }),
+    mkCredit({ kind: 'tarjeta', name: 'Cama', lender: visa.name, cardId: visa.id, total: amt(210), n: 3, rate: 0, firstMonth: addMonths(cur, -2), day: 10, categoryId: 'c-compras', note: 'para el dormitorio' }),
+    mkCredit({ kind: 'tarjeta', name: 'MacBook', lender: master.name, cardId: master.id, total: amt(1500), n: 24, rate: 1.5, firstMonth: addMonths(cur, -1), day: 10, categoryId: 'c-compras' }),
     mkCredit({ kind: 'prestamo', name: 'Auto', lender: 'BancoEstado', total: amt(8000), n: 48, rate: 1.1, firstMonth: addMonths(cur, -10), day: 20, paidBefore: 7 }),
   ];
   let seed = 7;
@@ -1538,14 +1872,14 @@ function sampleData() {
     fixed.forEach((f) => {
       if (f.day > lastDay) return;
       if (f.type === 'ahorro') d.transactions.push({ id: uid(), created: Date.now(), date: D(f.day), type: 'ahorro', amount: f.amount, goalId: f.goalId, note: f.name, fixedId: f.id });
-      else d.transactions.push({ id: uid(), created: Date.now(), date: D(f.day), type: f.type, amount: f.amount, categoryId: f.categoryId, kind: f.type === 'egreso' ? 'fijo' : undefined, note: f.name, fixedId: f.id });
+      else d.transactions.push({ id: uid(), created: Date.now(), date: D(f.day), type: f.type, amount: f.amount, categoryId: f.categoryId, kind: f.type === 'egreso' ? 'fijo' : undefined, note: f.name, fixedId: f.id, cardId: f.cardId });
     });
     if (back > 0) {
       d.credits.forEach((c) => {
         if (key < c.firstMonth) return;
         const k = c.paidBefore + d.transactions.filter((t) => t.creditId === c.id).length + 1;
         if (k > c.n) return;
-        d.transactions.push({ id: uid(), created: Date.now(), date: D(c.day), type: 'egreso', kind: 'fijo', categoryId: c.categoryId, amount: c.cuota, note: `${c.name} · cuota ${k} de ${c.n}`, creditId: c.id });
+        d.transactions.push({ id: uid(), created: Date.now(), date: D(c.day), type: 'egreso', kind: 'fijo', categoryId: c.categoryId, amount: c.cuota, note: `${c.name} · cuota ${k} de ${c.n}`, creditId: c.id, cardId: c.cardId });
       });
       d.transactions.push({ id: uid(), created: Date.now(), date: D(25), type: 'ahorro', amount: amt(150), goalId: vacas.id, note: '' });
     }
@@ -1558,11 +1892,21 @@ function sampleData() {
       if (rnd() < 0.1) tx(D(day), 'egreso', 5 + rnd() * 8, 'c-apps', 'hormiga');
       if (day % 7 === 3) tx(D(day), 'egreso', 70 + rnd() * 45, 'c-super', 'variable', 'Compra semanal');
       if (rnd() < 0.15) tx(D(day), 'egreso', 15 + rnd() * 25, 'c-transporte', 'variable', 'Bencina / transporte');
-      if (rnd() < 0.1) tx(D(day), 'egreso', 20 + rnd() * 35, 'c-restaurantes', 'variable');
-      if (rnd() < 0.05) tx(D(day), 'egreso', 25 + rnd() * 60, 'c-compras', 'variable');
+      if (rnd() < 0.1) { tx(D(day), 'egreso', 20 + rnd() * 35, 'c-restaurantes', 'variable'); d.transactions[d.transactions.length - 1].cardId = visa.id; }
+      if (rnd() < 0.05) { tx(D(day), 'egreso', 25 + rnd() * 60, 'c-compras', 'variable'); d.transactions[d.transactions.length - 1].cardId = master.id; }
       if (rnd() < 0.04) tx(D(day), 'egreso', 15 + rnd() * 40, 'c-ocio', 'variable', 'Cine / salida');
       if (rnd() < 0.03) tx(D(day), 'egreso', 10 + rnd() * 30, 'c-salud', 'variable', 'Farmacia');
     }
+  }
+  // Pagos de tarjeta: cada mes se paga lo cargado hasta fin del mes anterior
+  for (let back = 2; back >= 0; back--) {
+    const key = addMonths(cur, -back);
+    const prevEnd = `${addMonths(key, -1)}-31`;
+    d.cards.forEach((card) => {
+      if (back === 0 && card.dueDay > today) return;
+      const debt = d.transactions.reduce((s, t) => (t.cardId === card.id && t.date <= prevEnd ? s + (t.type === 'pago' ? -t.amount : t.amount) : s), 0);
+      if (debt > 0) d.transactions.push({ id: uid(), created: Date.now(), date: `${key}-${pad(card.dueDay)}`, type: 'pago', cardId: card.id, amount: round2(debt), note: '' });
+    });
   }
   d.transactions.forEach((t) => Object.keys(t).forEach((k) => t[k] === undefined && delete t[k]));
   return d;
@@ -2082,14 +2426,61 @@ const actions = {
   sample: () => {
     if (db.transactions.length && !confirm('Esto reemplazará tus datos actuales por datos de ejemplo. ¿Continuar?')) return;
     const snapshot = JSON.stringify(db);
-    db = sampleData(); save(); ui.month = currentMonth(); ui.tab = 'inicio'; render(); window.scrollTo(0, 0);
+    db = sampleData(); save(); autoChargeCards(); ui.month = currentMonth(); ui.tab = 'inicio'; render(); window.scrollTo(0, 0);
     toast('Datos de ejemplo cargados', () => { db = normalize(JSON.parse(snapshot)); save(); render(); });
   },
 
   // Movimientos
   filter: (el) => { ui.filter.type = el.dataset.type; render(); },
   'clear-cat': () => { ui.filter.cat = ''; render(); },
-  'edit-tx': (el) => openTxSheet({ id: el.dataset.id }),
+  'edit-tx': (el) => {
+    const t = db.transactions.find((x) => x.id === el.dataset.id);
+    if (t && t.type === 'pago') openPagoSheet(t.id); else openTxSheet({ id: el.dataset.id });
+  },
+  'tx-card': (el) => { syncTxDraft(); sheetCtx.cardId = el.dataset.id; drawTxSheet(false); },
+  'fx-card': (el) => { syncFixedDraft(); sheetCtx.cardId = el.dataset.id; drawFixedSheet(); },
+
+  // Tarjetas de crédito
+  'new-card': (el) => {
+    const from = el.dataset.from;
+    let returnTo = null;
+    if (from === 'tx-card') { syncTxDraft(); returnTo = { ctx: { ...sheetCtx } }; }
+    else if (from === 'fx-card') { syncFixedDraft(); returnTo = { ctx: { ...sheetCtx } }; }
+    openCardSheet(null, returnTo);
+  },
+  'edit-card': (el) => openCardSheet(el.dataset.id),
+  'save-card': () => saveCard(),
+  'del-card': () => {
+    const id = sheetCtx.id;
+    const debt = cardDebt(cardById(id));
+    if (debt > 0.5 && !confirm(`Esta tarjeta tiene ${money(debt)} por pagar. Si la eliminas, esa deuda ya no aparecerá. ¿Eliminarla igual?`)) return;
+    withUndo('Tarjeta eliminada', () => {
+    db.cards = db.cards.filter((c) => c.id !== id);
+    db.fixed.forEach((f) => { if (f.cardId === id) delete f.cardId; });
+    db.credits.forEach((c) => { if (c.cardId === id) delete c.cardId; });
+  }); },
+  'pay-card': (el) => openCardPay(el.dataset.id),
+  'filter-card': (el) => { closeSheet(); ui.tab = 'movimientos'; ui.filter = { type: 'all', q: '', cat: '', card: el.dataset.id }; render(); window.scrollTo(0, 0); },
+  'clear-card': () => { ui.filter.card = ''; render(); },
+  'split-add': (el) => {
+    syncSplits();
+    const assigned = sheetCtx.splits.reduce((s, r) => s + (parseAmount(r.amount) || 0), 0);
+    const rem = round2(cardPayDiff() - assigned);
+    sheetCtx.splits.push({ cat: el.dataset.id || 'c-otros', amount: rem > 0 ? String(rem) : '' });
+    renderCardPayDiff();
+    const last = document.getElementById(`spAmt${sheetCtx.splits.length - 1}`);
+    if (last) last.focus();
+  },
+  'split-del': (el) => { syncSplits(); sheetCtx.splits.splice(+el.dataset.i, 1); renderCardPayDiff(); },
+  'save-cardpay': () => saveCardPay(),
+  'save-pago': () => {
+    const t = db.transactions.find((x) => x.id === sheetCtx.id);
+    const amount = parseAmount(val('pgAmount'));
+    if (!(amount > 0)) { toast('Ingresa un monto válido'); return; }
+    t.amount = amount; t.date = val('pgDate') || t.date; t.note = val('pgNote').trim();
+    save(); closeSheet(); render(); toast('Pago actualizado');
+  },
+  'del-pago': () => { const id = sheetCtx.id; withUndo('Pago eliminado', () => { db.transactions = db.transactions.filter((t) => t.id !== id && t.payId !== id); }); },
   'tx-type': (el) => {
     syncTxDraft();
     if (sheetCtx.type === el.dataset.v) return;
@@ -2147,6 +2538,7 @@ const actions = {
     const t = creditTxIn(c, ui.month);
     if (t) {
       db.transactions = db.transactions.filter((x) => x !== t);
+      if (c.cardId && ui.month === currentMonth()) c.skip = ui.month;
       save(); render(); toast('Pago de cuota deshecho');
     } else payCredit(c, ui.month);
   },
@@ -2291,6 +2683,8 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('input', (e) => {
   if (e.target.closest && e.target.closest('[data-credit]')) recalcCredit(e.target.id);
+  if (e.target.id === 'cpAmount') { syncSplits(); renderCardPayDiff(); }
+  if (e.target.dataset && e.target.dataset.split !== undefined) updateSplitRemain();
   if (e.target.dataset.input === 'search') {
     ui.filter.q = e.target.value;
     $('#txList').innerHTML = renderTxList();
@@ -2298,6 +2692,13 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('change', async (e) => {
+  if (e.target.id === 'crCard') {
+    if (e.target.value === '__new') {
+      const v = readCreditForm();
+      openCardSheet(null, { ctx: { ...sheetCtx }, v });
+    } else { const v = readCreditForm(); sheetCtx.cardId = v.cardId; drawCreditSheet(v); }
+    return;
+  }
   if (e.target.id === 'lockBio') {
     if (e.target.checked) {
       try { await bioRegister(); toast(`${bioName()} activado ✓`); }
@@ -2345,7 +2746,10 @@ document.addEventListener('visibilitychange', () => {
     else if (lockUI.mode === 'unlock' && lockCfg.credId) setTimeout(() => bioUnlock(true), 300);
   }
   if (document.visibilityState === 'hidden' && cloudOn() && cloudState.pending) cloudPush();
-  if (document.visibilityState === 'visible' && cloudOn() && Date.now() - cloudState.lastCheck > 60000) cloudCheck();
+  if (document.visibilityState === 'visible') {
+    const check = cloudOn() && Date.now() - cloudState.lastCheck > 60000 ? cloudCheck() : Promise.resolve();
+    check.then(() => { if (autoChargeCards()) render(); });
+  }
   if (document.visibilityState === 'visible' && currentMonth() !== lastActiveMonth) {
     if (ui.month === lastActiveMonth) ui.month = currentMonth();
     lastActiveMonth = currentMonth();
@@ -2360,7 +2764,8 @@ if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 if (lockCfg.enabled) showLock('unlock');
 render();
 bioAvailable().then((ok) => { lockUI.bioAvail = ok; if (ui.tab === 'ajustes') render(); });
-if (cloudOn()) cloudCheck();
+// Primero comparar con Google Drive (si está activo) y después cargar suscripciones y cuotas a las tarjetas
+(cloudOn() ? cloudCheck() : Promise.resolve()).then(() => { if (autoChargeCards()) render(); });
 window.addEventListener('online', () => { if (cloudOn() && cloudState.status === 'error') cloudCheck(); });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
